@@ -1,0 +1,27 @@
+{
+  "name": "interagents-codex",
+  "version": "0.1.0",
+  "description": "Codex plugin for local agent-to-agent messaging over the interagents bus.",
+  "author": {
+    "name": "OlimpusSoft",
+    "url": "https://github.com/olimpussoft"
+  },
+  "homepage": "https://github.com/olimpussoft/olimpus-interagents",
+  "repository": "https://github.com/olimpussoft/olimpus-interagents",
+  "license": "MIT",
+  "keywords": ["codex", "agents", "messaging", "local"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Interagents Codex",
+    "shortDescription": "Local agent messaging for Codex.",
+    "longDescription": "Send messages between Codex, Claude, Kiro, and other local AI agent sessions using the shared interagents bus.",
+    "developerName": "OlimpusSoft",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Connect to the interagents bus.",
+      "List connected agents.",
+      "Send a message to another agent."
+    ]
+  }
+}

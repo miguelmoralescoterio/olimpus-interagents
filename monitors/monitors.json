@@ -1,0 +1,8 @@
+[
+  {
+    "name": "interagents-client",
+    "command": "python3 ${CLAUDE_PLUGIN_ROOT}/skills/interagents/bin/client.py",
+    "description": "interagents messages",
+    "when": "on-skill-invoke:interagents"
+  }
+]

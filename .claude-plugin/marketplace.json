@@ -1,0 +1,20 @@
+{
+  "name": "interagents",
+  "description": "Single-plugin marketplace for interagents: agent-to-agent messaging for AI agent sessions on the same machine.",
+  "owner": {
+    "name": "OlimpusSoft",
+    "url": "https://github.com/olimpussoft"
+  },
+  "plugins": [
+    {
+      "name": "interagents",
+      "description": "Inter-agent messaging for AI agent sessions on the same machine.",
+      "source": "./",
+      "version": "0.1.3",
+      "category": "productivity",
+      "tags": ["messaging", "agents", "automation"],
+      "homepage": "https://github.com/olimpussoft/olimpus-interagents",
+      "license": "MIT"
+    }
+  ]
+}
