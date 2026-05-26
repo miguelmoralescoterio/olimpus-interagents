@@ -172,6 +172,100 @@ class TestSendHelper:
 
 
 @pytest.mark.slow
+class TestDrainHelper:
+    def test_drain_reads_pending_broadcast_once(self, tmp_data_dir, free_port):
+        ppid_a, ppid_b = 20101, 20102
+        listener_a = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid_a)
+        listener_b = _spawn_listener(free_port, "beta", tmp_data_dir, ppid_b)
+        try:
+            _wait_for_state(tmp_data_dir, ppid_a)
+            _wait_for_state(tmp_data_dir, ppid_b)
+            time.sleep(0.5)
+            r = _run_helper("send.py", tmp_data_dir, ppid_a,
+                            "--all", "--text", "codex should drain this")
+            assert r.returncode == 0
+            time.sleep(0.5)
+
+            drained = _run_helper("drain.py", tmp_data_dir, ppid_b)
+            assert drained.returncode == 0, f"stderr={drained.stderr!r}"
+            assert "codex should drain this" in drained.stdout
+            assert 'from="alpha"' in drained.stdout
+
+            drained_again = _run_helper("drain.py", tmp_data_dir, ppid_b)
+            assert drained_again.returncode == 0
+            assert drained_again.stdout == ""
+        finally:
+            for p in (listener_a, listener_b):
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            _kill_server()
+
+    def test_drain_skips_messages_from_self(self, tmp_data_dir, free_port):
+        ppid_a, ppid_b = 20111, 20112
+        listener_a = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid_a)
+        listener_b = _spawn_listener(free_port, "beta", tmp_data_dir, ppid_b)
+        try:
+            _wait_for_state(tmp_data_dir, ppid_a)
+            _wait_for_state(tmp_data_dir, ppid_b)
+            time.sleep(0.5)
+            r = _run_helper("send.py", tmp_data_dir, ppid_a,
+                            "--all", "--text", "alpha broadcast")
+            assert r.returncode == 0
+            time.sleep(0.5)
+
+            drained = _run_helper("drain.py", tmp_data_dir, ppid_a)
+            assert drained.returncode == 0
+            assert "alpha broadcast" not in drained.stdout
+        finally:
+            for p in (listener_a, listener_b):
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            _kill_server()
+
+    def test_daemon_connect_then_drain(self, tmp_data_dir, free_port):
+        ppid_a, ppid_b = 20121, 20122
+        listener_a = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid_a)
+        daemon_pid = None
+        try:
+            _wait_for_state(tmp_data_dir, ppid_a)
+            r = _run_helper("interagents.py", tmp_data_dir, ppid_b,
+                            "connect", "--daemon", "--port", str(free_port),
+                            "--name", "beta", "--label", "codex")
+            assert r.returncode == 0, f"stderr={r.stderr!r}"
+            state_b = _wait_for_state(tmp_data_dir, ppid_b)
+            assert state_b is not None
+            assert state_b["name"] == "beta"
+            daemon_pid = int(state_b["listener_pid"])
+
+            sent = _run_helper("send.py", tmp_data_dir, ppid_a,
+                               "--all", "--text", "daemon drain message")
+            assert sent.returncode == 0
+            time.sleep(0.5)
+
+            drained = _run_helper("drain.py", tmp_data_dir, ppid_b)
+            assert drained.returncode == 0
+            assert "daemon drain message" in drained.stdout
+        finally:
+            listener_a.terminate()
+            try:
+                listener_a.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                listener_a.kill()
+            if daemon_pid is not None:
+                try:
+                    os.kill(daemon_pid, 15)
+                except OSError:
+                    pass
+            _kill_server()
+
+
+@pytest.mark.slow
 class TestListHelper:
     def test_list_shows_all_agents(self, tmp_data_dir, free_port):
         ppid_a, ppid_b = 20021, 20022
@@ -426,3 +520,17 @@ class TestDiscover:
         monkeypatch.setenv("INTERAGENTS_PPID_OVERRIDE", "99999")
         out = discover.find_listener_state()
         assert out is None
+
+
+class TestInteragentsWrapper:
+    def test_bare_name_is_connect_shorthand(self):
+        from bin import interagents
+        assert interagents._normalize_argv(["codex-main"]) == [
+            "connect", "--name", "codex-main",
+        ]
+
+    def test_known_command_is_unchanged(self):
+        from bin import interagents
+        assert interagents._normalize_argv(["drain", "--limit", "5"]) == [
+            "drain", "--limit", "5",
+        ]

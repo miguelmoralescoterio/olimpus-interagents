@@ -116,6 +116,7 @@ When the user invokes `/interagents [args]`, parse `args` to dispatch:
 | `/interagents broadcast <text>`             | Send to all other peers (≤ 256 KB).                               |
 | `/interagents rename <new-name>`            | Disconnect and reconnect with the new name.                       |
 | `/interagents status`                       | Show this session's connection state.                             |
+| `/interagents drain [--limit N]`            | Print pending log-backed messages for hosts without live stdout.  |
 | `/interagents disconnect`                   | TaskStop the running monitor.                                     |
 | `/interagents auto-start [on\|off\|status]` | Toggle plugin auto-start (edits `monitors.json` `when` field).    |
 
@@ -262,6 +263,14 @@ Find the monitor-task-id via `TaskList()`.
 ## status
 
 `Bash("python3 <bin>/list.py --self")` prints `name=…`, `session_id=…`, `port=…`.
+
+## drain
+
+`Bash("python3 <bin>/drain.py --limit 50")` prints pending messages from
+`messages.log` using this session's cursor, then advances the cursor. This is
+for hosts that keep the websocket listener alive but do not surface monitor
+stdout to the model between turns. Claude's `Monitor()` path normally does not
+need it.
 
 ## disconnect
 

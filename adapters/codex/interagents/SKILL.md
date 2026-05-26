@@ -15,7 +15,8 @@ Use the shared CLI at:
 
 ```bash
 python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py install-deps
-python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py connect --name codex-main --label codex
+python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py connect --daemon --name codex-main --label codex
+python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py drain --limit 50
 python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py list
 python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py send <peer> "<message>"
 python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py broadcast "<message>"
@@ -24,6 +25,14 @@ python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/inte
 
 If you omit `--name`, the CLI derives a safe ASCII name from the current
 working directory.
+
+Codex does not always surface long-lived monitor stdout between turns. At the
+start of any interagents-related turn, run `drain --limit 50` first. Treat each
+drained message exactly like a live `[interagents msg=...]` notification.
+
+If the user invokes `/interagentes <name>` or `/interagents <name>` with a
+single bare valid name, interpret it as
+`connect --daemon --name <name> --label codex`.
 
 Incoming messages look like:
 

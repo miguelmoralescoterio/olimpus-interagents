@@ -113,17 +113,31 @@ codex plugin add interagents-codex@personal
 ```
 
 The plugin exposes the same local CLI and skill text from the bundled
-`plugins/interagents-codex/skills/interagents/` directory.
+`plugins/interagents-codex/skills/interagents/` directory. It also declares a
+Codex monitor in `plugins/interagents-codex/monitors/monitors.json`:
 
-Start a listener in the Codex project terminal:
+```json
+{
+  "command": "python3 ${CODEX_PLUGIN_ROOT}/skills/interagents/bin/client.py --label codex",
+  "when": "always",
+  "persistent": true
+}
+```
+
+When the Codex runtime supports plugin monitors, that foreground client is the
+native path: Codex should start it, drain stdout, and inject
+`[interagents msg=...]` lines as background session events.
+
+Until that runtime support is available, start a listener in the Codex project
+terminal or through the Codex skill:
 
 ```bash
 python3 plugins/interagents-codex/skills/interagents/bin/interagents.py \
-  connect --name codex-main --label codex
+  connect --daemon --name codex-main --label codex
 ```
 
 When Codex is asked to check interagent messages, it should read the listener
-output or run `list`, `status`, and `send` through the same CLI.
+output or run `drain`, `list`, `status`, and `send` through the same CLI.
 
 ## Kiro Installation
 
