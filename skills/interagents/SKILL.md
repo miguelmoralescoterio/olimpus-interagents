@@ -193,6 +193,30 @@ and ask them for a name: `/interagents connect <some-other-name>`.
 **On `[interagents] dependencies missing`**: run `/interagents install-deps`,
 then re-run `/interagents connect`.
 
+### opencode — background Bash listener
+
+opencode does not have `Monitor`. Start the listener as a background
+process in a separate terminal, then use `drain` to poll for messages:
+
+1. **Open a second terminal** and run:
+   ```bash
+   python3 <bin>/client.py --name <name>
+   ```
+   Where `<name>` follows the same rules as above (validate or propose).
+2. **In the opencode session**, check for messages periodically:
+   ```bash
+   python3 <bin>/drain.py --limit 50
+   ```
+   Or use `list`, `status`, `send` as needed.
+3. **To stop**: find the PID and kill it:
+   ```bash
+   kill $(python3 <bin>/list.py --self | grep listener_pid | awk '{print $NF}')
+   ```
+
+The second terminal stays open showing live peer messages. opencode's
+session polls via `drain` on each turn. This is the same model used by
+Codex and Kiro — only Claude has `Monitor` for in-session streaming.
+
 ## install-deps — install runtime deps into an isolated venv
 
 Interagents keeps its Python deps in a dedicated venv at
@@ -251,7 +275,9 @@ preserves them.
 
 ## rename — disconnect + reconnect
 
-Rename = disconnect + reconnect. Run:
+Rename = disconnect + reconnect.
+
+### Claude
 
 ```
 TaskStop(<monitor-task-id>)
@@ -259,6 +285,17 @@ Monitor(command="python3 <bin>/client.py --name <new-name>", ...)
 ```
 
 Find the monitor-task-id via `TaskList()`.
+
+### opencode / Codex / Kiro
+
+Kill the existing listener and restart in the second terminal:
+
+```bash
+kill $(python3 <bin>/list.py --self | grep listener_pid | awk '{print $NF}')
+sleep 1.5
+# Then in the second terminal:
+python3 <bin>/client.py --name <new-name>
+```
 
 ## status
 
@@ -274,10 +311,23 @@ need it.
 
 ## disconnect
 
+### Claude
+
 Call `TaskList()`, find the task whose description is `"interagents messages"`,
 then `TaskStop(<id>)`.
 
+### opencode / Codex / Kiro
+
+```bash
+kill $(python3 <bin>/list.py --self | grep listener_pid | awk '{print $NF}')
+```
+
+Then close the second terminal where the listener was running.
+
 ## auto-start — toggle plugin auto-start mode
+
+> **Note:** auto-start is a Claude Code plugin feature. opencode, Codex,
+> and Kiro users start the listener manually in a separate terminal.
 
 Edits the plugin's `monitors/monitors.json` `when` field. The script
 self-locates relative to its own path (`<bin>/auto_start.py` →

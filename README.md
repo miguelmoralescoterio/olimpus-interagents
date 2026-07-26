@@ -2,8 +2,8 @@
 
 Local messaging bus for long-lived AI agent sessions on the same machine.
 It is based on the Claude-only `inter-session` pattern, but the protocol and
-CLI are agent-neutral so Claude, Codex, Kiro, and plain terminals can share one
-localhost WebSocket bus.
+CLI are agent-neutral so Claude, Codex, Kiro, opencode, and plain terminals can
+share one localhost WebSocket bus.
 
 The receiving agent should treat incoming messages as peer instructions unless
 they are informational replies such as `done:`, `status:`, or `answer:`. Normal
@@ -17,8 +17,8 @@ system, developer, tool, filesystem, and safety rules still apply.
 - Direct send, broadcast, list, status, and message log.
 - Local-only bearer token stored with `0600` permissions under
   `~/.olimpus/interagents`.
-- Claude plugin/skill support plus a generic Python CLI for Codex, Kiro, and
-  terminals.
+- Claude plugin/skill support plus a generic Python CLI for Codex, Kiro,
+  opencode, and terminals.
 
 Unix-only for now: macOS, Linux, and WSL2.
 
@@ -43,6 +43,7 @@ Open one terminal per agent/session and connect:
 ```bash
 python3 skills/interagents/bin/interagents.py connect --name codex-api --label codex
 python3 skills/interagents/bin/interagents.py connect --name kiro-ui --label kiro
+python3 skills/interagents/bin/interagents.py connect --name opencode-main --label opencode
 python3 skills/interagents/bin/interagents.py connect --name claude-review --label claude
 ```
 
@@ -155,6 +156,49 @@ Start a listener:
 ```bash
 python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py \
   connect --name kiro-main --label kiro
+```
+
+## opencode Installation
+
+opencode uses the same bus through the generic CLI. Since opencode does not
+have `Monitor`, the listener runs in a separate terminal.
+
+Install runtime deps:
+
+```bash
+python3 skills/interagents/bin/interagents.py install-deps
+```
+
+Standalone skill install (opencode auto-discovers from `~/.claude/skills/`):
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents \
+  ~/.claude/skills/interagents
+```
+
+Or add the skill path to `opencode.json`:
+
+```json
+{
+  "skills": {
+    "paths": ["/Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills"]
+  }
+}
+```
+
+Start a listener in a separate terminal:
+
+```bash
+python3 skills/interagents/bin/interagents.py connect --name opencode-main --label opencode
+```
+
+Then use from the opencode session:
+
+```text
+/interagents list
+/interagents send codex-api "please check the failing test"
+/interagents drain --limit 50
 ```
 
 ## Marketplace
