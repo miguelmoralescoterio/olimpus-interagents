@@ -1,6 +1,6 @@
 # Plan: Interagents Phase 7 Migration
 
-**Fecha:** 2026-08-14 | **Estado:** En progreso | **Prioridad:** Alta
+**Fecha:** 2026-08-14 | **Estado:** Completado | **Prioridad:** Alta
 
 ## Objetivo
 
@@ -59,16 +59,16 @@ permanece activo hasta recibir GO humano explícito para el cutover.
 
 ### T004: Verificación y entrega
 
-- **Estado:** En progreso | **Prioridad:** Alta
+- **Estado:** Completado | **Prioridad:** Alta
 - **Descripción:** Sincronizar core/plugin, ejecutar gates y smoke de dos
   sesiones, y abrir PR draft hacia `develop`.
 - **Criterios de aceptación:**
   - [x] `poetry check` y suite completa verdes.
   - [x] Core y copia del plugin sincronizados.
   - [x] Smoke directo/broadcast/drain/export/SQLite-off exitoso.
-  - [ ] PR draft con riesgos y rollback documentados.
+  - [x] PR draft #1 con riesgos y rollback documentados.
 - **Dependencias:** T001, T002, T003
-- **Inicio:** 2026-08-14 | **Fin:** —
+- **Inicio:** 2026-08-14 | **Fin:** 2026-08-14
 
 ## Riesgos
 
@@ -84,4 +84,4 @@ persistencia, logs de fallback sin secretos, conteos exportados y smoke local.
 
 ## Progreso
 
-**General:** 95% | **Total:** 4 | **Completadas:** 3 | **En progreso:** 1 | **Bloqueadas:** 0
+**General:** 100% | **Total:** 4 | **Completadas:** 4 | **En progreso:** 0 | **Bloqueadas:** 0
