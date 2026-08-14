@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -153,6 +154,50 @@ class TestEnsureServerRunning:
             assert not (tmp_data_dir / f"server.{free_port}.pid.meta").exists()
         finally:
             squat.close()
+
+    def test_concurrent_calls_elect_exactly_one_daemon(self, tmp_data_dir, free_port, monkeypatch):
+        """Race-safety regression: several clients calling ensure_server_running
+        for the same (host, port) at once must converge on a single daemon.
+        bind() is atomic at the kernel level, so exactly one caller's bind()
+        succeeds and spawns the server; every other caller must observe that
+        server coming up (via wait_for_server) instead of spawning a second one.
+        """
+        shared.secure_dir(tmp_data_dir)
+        real_popen = subprocess.Popen
+        spawn_calls: list = []
+
+        def counting_popen(*args, **kwargs):
+            spawn_calls.append((args, kwargs))
+            return real_popen(*args, **kwargs)
+
+        monkeypatch.setattr(spawn.subprocess, "Popen", counting_popen)
+
+        contenders = 3
+        barrier = threading.Barrier(contenders)
+        results = [None] * contenders
+
+        def worker(i):
+            barrier.wait(timeout=5)
+            results[i] = spawn.ensure_server_running(port=free_port, idle_shutdown_minutes=1)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(contenders)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        try:
+            assert all(r is True for r in results), f"not every caller saw a running server: {results}"
+            assert len(spawn_calls) == 1, f"expected exactly one daemon spawn, got {len(spawn_calls)}"
+            assert spawn.is_server_up("127.0.0.1", free_port)
+        finally:
+            pid_path = shared.pidfile_path(free_port)
+            if pid_path.exists():
+                try:
+                    pid = int(pid_path.read_text().strip())
+                    os.kill(pid, 9)
+                except (OSError, ValueError):
+                    pass
 
     def test_custom_host_is_written_to_identity(self, tmp_data_dir, free_port):
         shared.secure_dir(tmp_data_dir)

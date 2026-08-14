@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -120,6 +121,175 @@ class TestSendHelper:
                     p.kill()
             _kill_server()
 
+    def test_send_dual_writes_jsonl_and_sqlite(self, tmp_data_dir, free_port):
+        ppid_a = 20041
+        ppid_b = 20042
+        listener_a = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid_a)
+        listener_b = _spawn_listener(free_port, "beta", tmp_data_dir, ppid_b)
+        try:
+            state_a = _wait_for_state(tmp_data_dir, ppid_a)
+            state_b = _wait_for_state(tmp_data_dir, ppid_b)
+            assert state_a is not None
+            assert state_b is not None
+            time.sleep(0.5)
+            r = _run_helper("send.py", tmp_data_dir, ppid_a,
+                            "--to", "beta", "--text", "persist this",
+                            "--in-reply-to-message-id", "orig-1")
+            assert r.returncode == 0, f"stderr={r.stderr!r}"
+            time.sleep(0.5)
+
+            log_path = tmp_data_dir / "messages.log"
+            log_text = log_path.read_text()
+            assert "persist this" in log_text
+            assert "orig-1" in log_text
+
+            conn = sqlite3.connect(tmp_data_dir / "interagents.sqlite3")
+            conn.row_factory = sqlite3.Row
+            try:
+                msg = conn.execute(
+                    "select * from messages where text = 'persist this'"
+                ).fetchone()
+                delivery = conn.execute(
+                    "select * from message_deliveries where message_id = ?",
+                    (msg["id"],),
+                ).fetchone()
+                sessions = {
+                    row["id"]: row["status"]
+                    for row in conn.execute("select id, status from sessions")
+                }
+            finally:
+                conn.close()
+
+            assert msg["kind"] == "direct"
+            assert msg["from_session_id"] == state_a["session_id"]
+            assert msg["to_session_id"] == state_b["session_id"]
+            assert msg["in_reply_to_message_id"] == "orig-1"
+            assert delivery["session_id"] == state_b["session_id"]
+            assert delivery["delivery_state"] == "pending"
+            assert sessions[state_a["session_id"]] == "active"
+            assert sessions[state_b["session_id"]] == "active"
+        finally:
+            for p in (listener_a, listener_b):
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            _kill_server()
+
+    def test_sqlite_survives_server_kill_after_committed_send(self, tmp_data_dir, free_port):
+        ppid_a = 20061
+        ppid_b = 20062
+        listener_a = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid_a)
+        listener_b = _spawn_listener(free_port, "beta", tmp_data_dir, ppid_b)
+        try:
+            _wait_for_state(tmp_data_dir, ppid_a)
+            _wait_for_state(tmp_data_dir, ppid_b)
+            time.sleep(0.5)
+            sent = _run_helper("send.py", tmp_data_dir, ppid_a,
+                               "--to", "beta", "--text", "survive kill")
+            assert sent.returncode == 0, f"stderr={sent.stderr!r}"
+            time.sleep(0.5)
+
+            pid_path = tmp_data_dir / f"server.{free_port}.pid"
+            assert pid_path.exists()
+            os.kill(int(pid_path.read_text().strip()), 9)
+            time.sleep(0.2)
+
+            conn = sqlite3.connect(tmp_data_dir / "interagents.sqlite3")
+            conn.row_factory = sqlite3.Row
+            try:
+                msg = conn.execute(
+                    "select * from messages where text = 'survive kill'"
+                ).fetchone()
+                delivery = conn.execute(
+                    "select * from message_deliveries where message_id = ?",
+                    (msg["id"],),
+                ).fetchone()
+            finally:
+                conn.close()
+
+            assert msg["text"] == "survive kill"
+            assert delivery["delivery_state"] == "pending"
+        finally:
+            for p in (listener_a, listener_b):
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            _kill_server()
+
+    def test_answer_with_reply_correlation_closes_original_delivery(self, tmp_data_dir, free_port):
+        ppid_a = 20051
+        ppid_b = 20052
+        listener_a = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid_a)
+        listener_b = _spawn_listener(free_port, "beta", tmp_data_dir, ppid_b)
+        try:
+            state_b = _wait_for_state(tmp_data_dir, ppid_b)
+            _wait_for_state(tmp_data_dir, ppid_a)
+            assert state_b is not None
+            time.sleep(0.5)
+
+            sent = _run_helper("send.py", tmp_data_dir, ppid_a,
+                               "--to", "beta", "--text", "please check")
+            assert sent.returncode == 0, f"stderr={sent.stderr!r}"
+            time.sleep(0.5)
+
+            conn = sqlite3.connect(tmp_data_dir / "interagents.sqlite3")
+            conn.row_factory = sqlite3.Row
+            try:
+                original = conn.execute(
+                    "select * from messages where text = 'please check'"
+                ).fetchone()
+            finally:
+                conn.close()
+            assert original is not None
+
+            reply = _run_helper(
+                "send.py",
+                tmp_data_dir,
+                ppid_b,
+                "--to",
+                "alpha",
+                "--text",
+                "answer: checked",
+                "--in-reply-to-message-id",
+                original["id"],
+            )
+            assert reply.returncode == 0, f"stderr={reply.stderr!r}"
+            time.sleep(0.5)
+
+            conn = sqlite3.connect(tmp_data_dir / "interagents.sqlite3")
+            conn.row_factory = sqlite3.Row
+            try:
+                delivery = conn.execute(
+                    """
+                    select *
+                    from message_deliveries
+                    where message_id = ? and session_id = ?
+                    """,
+                    (original["id"], state_b["session_id"]),
+                ).fetchone()
+                reply_msg = conn.execute(
+                    "select * from messages where in_reply_to_message_id = ?",
+                    (original["id"],),
+                ).fetchone()
+            finally:
+                conn.close()
+
+            assert delivery["delivery_state"] == "read"
+            assert delivery["disposition"] == "replied"
+            assert delivery["reply_message_id"] == reply_msg["id"]
+        finally:
+            for p in (listener_a, listener_b):
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            _kill_server()
+
     def test_send_unknown_peer(self, tmp_data_dir, free_port):
         ppid = 20003
         listener = _spawn_listener(free_port, "alpha", tmp_data_dir, ppid)
@@ -190,6 +360,21 @@ class TestDrainHelper:
             assert drained.returncode == 0, f"stderr={drained.stderr!r}"
             assert "codex should drain this" in drained.stdout
             assert 'from="alpha"' in drained.stdout
+
+            conn = sqlite3.connect(tmp_data_dir / "interagents.sqlite3")
+            conn.row_factory = sqlite3.Row
+            try:
+                delivery = conn.execute(
+                    """
+                    select d.*
+                    from message_deliveries d
+                    join messages m on m.id = d.message_id
+                    where m.text = 'codex should drain this'
+                    """
+                ).fetchone()
+            finally:
+                conn.close()
+            assert delivery["delivery_state"] == "delivered"
 
             drained_again = _run_helper("drain.py", tmp_data_dir, ppid_b)
             assert drained_again.returncode == 0
@@ -533,4 +718,10 @@ class TestInteragentsWrapper:
         from bin import interagents
         assert interagents._normalize_argv(["drain", "--limit", "5"]) == [
             "drain", "--limit", "5",
+        ]
+
+    def test_export_is_a_known_command(self):
+        from bin import interagents
+        assert interagents._normalize_argv(["export", "--table", "messages"]) == [
+            "export", "--table", "messages",
         ]
