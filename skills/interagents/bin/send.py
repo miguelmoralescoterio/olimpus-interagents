@@ -86,6 +86,8 @@ async def _run(args) -> int:
 
         op = "broadcast" if args.all else "send"
         payload = {"op": op, "text": args.text}
+        if args.in_reply_to_message_id:
+            payload["in_reply_to_message_id"] = args.in_reply_to_message_id
         if not args.all:
             payload["to"] = args.to
         await ws.send(json.dumps(payload))
@@ -114,6 +116,8 @@ def main() -> int:
     parser.add_argument("--to", help="target name or short session_id (omit with --all)")
     parser.add_argument("--all", action="store_true", help="broadcast to all other sessions")
     parser.add_argument("--text", required=True)
+    parser.add_argument("--in-reply-to-message-id", default=None,
+                        help="message id this message replies to")
     args = parser.parse_args()
     if not args.all and not args.to:
         parser.error("--to required unless --all")

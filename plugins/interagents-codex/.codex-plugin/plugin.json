@@ -11,6 +11,7 @@
   "license": "MIT",
   "keywords": ["codex", "agents", "messaging", "local"],
   "skills": "./skills/",
+  "monitors": "./monitors/monitors.json",
   "interface": {
     "displayName": "Interagents Codex",
     "shortDescription": "Local agent messaging for Codex.",

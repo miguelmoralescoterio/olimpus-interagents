@@ -116,6 +116,14 @@ When the user invokes `/interagents [args]`, parse `args` to dispatch:
 | `/interagents broadcast <text>`             | Send to all other peers (≤ 256 KB).                               |
 | `/interagents rename <new-name>`            | Disconnect and reconnect with the new name.                       |
 | `/interagents status`                       | Show this session's connection state.                             |
+| `/interagents drain [--limit N]`            | Print pending log-backed messages for hosts without live stdout.  |
+| `/interagents loop [--interval-seconds N]`  | Periodically drain for hosts without monitor/hook delivery.       |
+| `/interagents get-message <msg-id>`         | Print one persisted SQLite message.                               |
+| `/interagents export [--table ...]`         | Export persisted state as redacted JSON.                          |
+| `/interagents mark-read <msg-id>`           | Mark a received message as read.                                  |
+| `/interagents mark-replied <msg-id>`        | Mark a received message as replied.                               |
+| `/interagents mark-skipped <msg-id>`        | Mark a received message as skipped.                               |
+| `/interagents mark-failed <msg-id>`         | Mark a received message as failed.                                |
 | `/interagents disconnect`                   | TaskStop the running monitor.                                     |
 | `/interagents auto-start [on\|off\|status]` | Toggle plugin auto-start (edits `monitors.json` `when` field).    |
 
@@ -192,6 +200,30 @@ and ask them for a name: `/interagents connect <some-other-name>`.
 **On `[interagents] dependencies missing`**: run `/interagents install-deps`,
 then re-run `/interagents connect`.
 
+### opencode — background Bash listener
+
+opencode does not have `Monitor`. Start the listener as a background
+process in a separate terminal, then use `drain` to poll for messages:
+
+1. **Open a second terminal** and run:
+   ```bash
+   python3 <bin>/client.py --name <name>
+   ```
+   Where `<name>` follows the same rules as above (validate or propose).
+2. **In the opencode session**, check for messages periodically:
+   ```bash
+   python3 <bin>/drain.py --limit 50
+   ```
+   Or use `list`, `status`, `send` as needed.
+3. **To stop**: find the PID and kill it:
+   ```bash
+   kill $(python3 <bin>/list.py --self | grep listener_pid | awk '{print $NF}')
+   ```
+
+The second terminal stays open showing live peer messages. opencode's
+session polls via `drain` on each turn. This is the same model used by
+Codex and Kiro — only Claude has `Monitor` for in-session streaming.
+
 ## install-deps — install runtime deps into an isolated venv
 
 Interagents keeps its Python deps in a dedicated venv at
@@ -241,6 +273,7 @@ Rare on modern macOS / Linux / WSL2, but if the venv module is missing
 ```
 list:        Bash("python3 <bin>/list.py")
 send:        Bash("python3 <bin>/send.py --to <target> --text '<text>'")
+reply-send:  Bash("python3 <bin>/send.py --to <target> --text 'answer: <text>' --in-reply-to-message-id <msg-id>")
 broadcast:   Bash("python3 <bin>/send.py --all --text '<text>'")
 ```
 
@@ -248,9 +281,15 @@ Quote `<text>` carefully — single-quote it and escape single quotes via
 `'\''`. If the user's text contains backticks or `$()`, single-quoting
 preserves them.
 
+When replying to a specific peer message, include
+`--in-reply-to-message-id <msg-id>` so SQLite can mark the original delivery
+as `replied` automatically for `done:` and `answer:` replies.
+
 ## rename — disconnect + reconnect
 
-Rename = disconnect + reconnect. Run:
+Rename = disconnect + reconnect.
+
+### Claude
 
 ```
 TaskStop(<monitor-task-id>)
@@ -259,16 +298,54 @@ Monitor(command="python3 <bin>/client.py --name <new-name>", ...)
 
 Find the monitor-task-id via `TaskList()`.
 
+### opencode / Codex / Kiro
+
+Kill the existing listener and restart in the second terminal:
+
+```bash
+kill $(python3 <bin>/list.py --self | grep listener_pid | awk '{print $NF}')
+sleep 1.5
+# Then in the second terminal:
+python3 <bin>/client.py --name <new-name>
+```
+
 ## status
 
 `Bash("python3 <bin>/list.py --self")` prints `name=…`, `session_id=…`, `port=…`.
 
+## drain
+
+`Bash("python3 <bin>/drain.py --limit 50")` prints pending messages for this
+session. During the migration it reads SQLite deliveries first and falls back
+to `messages.log` using this session's cursor. This is for hosts that keep the
+websocket listener alive but do not surface monitor stdout to the model between
+turns. Claude's `Monitor()` path normally does not need it.
+
+## loop
+
+`Bash("python3 <bin>/loop.py --interval-seconds 120 --limit 50")` keeps
+draining every two minutes for hosts that cannot run a live monitor or reliable
+pre-turn hook. Do not start multiple loops for the same session.
+
 ## disconnect
+
+### Claude
 
 Call `TaskList()`, find the task whose description is `"interagents messages"`,
 then `TaskStop(<id>)`.
 
+### opencode / Codex / Kiro
+
+```bash
+kill $(python3 <bin>/list.py --self | grep listener_pid | awk '{print $NF}')
+```
+
+Then close the second terminal where the listener was running.
+
 ## auto-start — toggle plugin auto-start mode
+
+> **Note:** auto-start is a Claude Code plugin feature. opencode, Codex,
+> and Kiro users start the listener manually in a separate terminal.
 
 Edits the plugin's `monitors/monitors.json` `when` field. The script
 self-locates relative to its own path (`<bin>/auto_start.py` →

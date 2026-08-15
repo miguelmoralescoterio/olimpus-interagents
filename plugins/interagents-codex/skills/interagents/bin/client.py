@@ -114,6 +114,31 @@ def _delete_session_state(ppid: int) -> None:
         pass
 
 
+def _cursor_path(session_id: str) -> Path:
+    safe_id = "".join(ch for ch in session_id if ch.isalnum() or ch == "-")[:64]
+    return shared.clients_dir() / f"{safe_id}.cursor"
+
+
+def _init_drain_cursor(session_id: str) -> None:
+    """Start log-based drains at the current end of messages.log.
+
+    The websocket listener remains the real-time delivery path. The cursor is
+    only for hosts that need to poll between turns, so it should not replay old
+    messages that predate this listener session.
+    """
+    try:
+        shared.secure_dir(shared.clients_dir())
+        log_path = shared.messages_log_path()
+        pos = log_path.stat().st_size if log_path.exists() else 0
+        path = _cursor_path(session_id)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(f"{pos}\n")
+        shared.secure_file(tmp)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _resolve_ppid() -> int:
     """Resolve the state-file key (also the dedup-lock key) for this listener.
 
@@ -258,6 +283,7 @@ class Client:
             self._stop.set()
             return
         token = shared.ensure_token(shared.token_path())
+        container = shared.detect_container_process(os.getpid())
         async with websockets.connect(
             f"ws://{self.host}:{self.port}/",
             max_size=shared.WS_FRAME_CAP,
@@ -269,6 +295,10 @@ class Client:
                 "label": self.label,
                 "cwd": os.getcwd(),
                 "pid": os.getpid(),
+                "parent_pid": os.getppid(),
+                "container_pid": container.get("container_pid"),
+                "container_kind": container.get("container_kind", "unknown"),
+                "container_title": container.get("container_title", ""),
                 "role": shared.Role.AGENT.value,
                 "token": token,
                 "nonce": self.nonce,
@@ -319,6 +349,7 @@ class Client:
                 "port": self.port,
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
             })
+            _init_drain_cursor(self.session_id)
 
             ping_task = asyncio.create_task(self._ping_loop(ws))
             try:

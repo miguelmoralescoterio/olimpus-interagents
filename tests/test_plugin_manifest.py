@@ -41,6 +41,7 @@ class TestCodexPluginJson:
         cfg = json.loads((REPO / "plugins" / "interagents-codex" / ".codex-plugin" / "plugin.json").read_text())
         assert cfg["name"] == "interagents-codex"
         assert cfg["skills"] == "./skills/"
+        assert cfg["monitors"] == "./monitors/monitors.json"
         assert cfg["interface"]["displayName"] == "Interagents Codex"
         assert isinstance(cfg["interface"]["defaultPrompt"], list)
         assert len(cfg["interface"]["defaultPrompt"]) == 3
@@ -49,8 +50,46 @@ class TestCodexPluginJson:
         root = REPO / "plugins" / "interagents-codex" / "skills" / "interagents"
         assert (root / "SKILL.md").is_file()
         assert (root / "requirements.txt").is_file()
-        for script in ("client.py", "server.py", "send.py", "list.py", "interagents.py"):
+        for script in (
+            "client.py", "server.py", "send.py", "list.py", "drain.py",
+            "interagents.py", "mcp_stdio.py", "storage.py", "state.py",
+            "disconnect.py", "loop.py",
+        ):
             assert (root / "bin" / script).is_file()
+
+    def test_runtime_bundle_matches_root_skill_scripts(self):
+        root = REPO / "skills" / "interagents" / "bin"
+        bundled = REPO / "plugins" / "interagents-codex" / "skills" / "interagents" / "bin"
+        for script in (
+            "auto_start.py", "client.py", "server.py", "send.py", "list.py",
+            "drain.py", "interagents.py", "mcp_stdio.py", "storage.py",
+            "state.py", "disconnect.py", "loop.py", "shared.py", "discover.py",
+            "spawn.py",
+        ):
+            assert (bundled / script).read_text() == (root / script).read_text()
+
+    def test_spanish_alias_skill_exists(self):
+        alias = REPO / "plugins" / "interagents-codex" / "skills" / "interagentes" / "SKILL.md"
+        text = alias.read_text()
+        assert "name: interagentes" in text
+        assert "drain --limit 50" in text
+        assert "connect --daemon --name <name> --label codex" in text
+
+    def test_codex_monitor_manifest(self):
+        monitors = json.loads((
+            REPO / "plugins" / "interagents-codex" / "monitors" / "monitors.json"
+        ).read_text())
+        assert isinstance(monitors, list)
+        assert len(monitors) == 1
+        m = monitors[0]
+        assert m["name"] == "interagents-client"
+        assert m["description"] == "interagents messages"
+        assert m["when"] == "always"
+        assert m["persistent"] is True
+        assert "${CODEX_PLUGIN_ROOT}/skills/interagents/bin/client.py" in m["command"]
+        assert "--label codex" in m["command"]
+        for forbidden in ("--daemon", "--port", "--idle-shutdown-minutes"):
+            assert forbidden not in m["command"]
 
 
 class TestCodexMarketplace:
@@ -143,9 +182,25 @@ class TestBinScriptsExist:
     def test_send_and_list(self):
         assert (BIN_DIR / "send.py").is_file()
         assert (BIN_DIR / "list.py").is_file()
+        assert (BIN_DIR / "drain.py").is_file()
 
     def test_auto_start_py(self):
         assert (BIN_DIR / "auto_start.py").is_file()
+
+    def test_mcp_stdio_py(self):
+        assert (BIN_DIR / "mcp_stdio.py").is_file()
+
+    def test_storage_py(self):
+        assert (BIN_DIR / "storage.py").is_file()
+
+    def test_state_py(self):
+        assert (BIN_DIR / "state.py").is_file()
+
+    def test_disconnect_py(self):
+        assert (BIN_DIR / "disconnect.py").is_file()
+
+    def test_loop_py(self):
+        assert (BIN_DIR / "loop.py").is_file()
 
     def test_no_bin_at_repo_root(self):
         """bin/ moved into the skill dir; old top-level location is gone."""

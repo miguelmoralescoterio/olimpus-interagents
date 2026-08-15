@@ -1,0 +1,9 @@
+[
+  {
+    "name": "interagents-client",
+    "command": "python3 ${CODEX_PLUGIN_ROOT}/skills/interagents/bin/client.py --label codex",
+    "description": "interagents messages",
+    "when": "always",
+    "persistent": true
+  }
+]

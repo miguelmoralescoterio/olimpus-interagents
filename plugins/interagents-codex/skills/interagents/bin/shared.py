@@ -514,6 +514,50 @@ def _looks_like_agent_process(exe: str, cmd: list[str]) -> bool:
     return False
 
 
+def detect_container_process(start_pid: int | None = None) -> dict[str, object]:
+    """Best-effort terminal/IDE container detection for session metadata."""
+    try:
+        import psutil
+    except ImportError:
+        return {"container_pid": None, "container_kind": "unknown", "container_title": ""}
+    pid = start_pid or os.getpid()
+    seen: set[int] = set()
+    while pid and pid not in seen and pid != 1:
+        seen.add(pid)
+        try:
+            proc = psutil.Process(pid)
+            name = proc.name().lower()
+            cmdline = " ".join(proc.cmdline()).lower()
+            parent_pid = proc.ppid()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            break
+        kind = _container_kind(name, cmdline)
+        if kind != "unknown":
+            return {
+                "container_pid": pid,
+                "container_kind": kind,
+                "container_title": "",
+            }
+        pid = parent_pid
+    return {"container_pid": None, "container_kind": "unknown", "container_title": ""}
+
+
+def _container_kind(name: str, cmdline: str) -> str:
+    checks = (
+        ("iterm", ("iterm", "iterm2")),
+        ("terminal", ("terminal", "gnome-terminal", "konsole", "alacritty", "wezterm")),
+        ("cursor", ("cursor",)),
+        ("windsurf", ("windsurf", "codeium")),
+        ("vscode", ("visual studio code", " code ", "/code")),
+        ("kiro", ("kiro",)),
+    )
+    haystack = f"{name} {cmdline}"
+    for kind, needles in checks:
+        if any(needle in haystack for needle in needles):
+            return kind
+    return "unknown"
+
+
 def resolve_listener_key() -> int:
     """Pid used as the state-file key for the interagents listener of the
     current AI agent session. Both `client.py` (writer) and helpers
