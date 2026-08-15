@@ -190,6 +190,8 @@ class Client:
         ppid: Optional[int] = None,
         verbose: bool = False,
         max_collision_retries: int = 3,
+        ping_interval_s: float = shared.PING_INTERVAL_S,
+        pong_timeout_s: float = shared.PONG_TIMEOUT_S,
     ):
         self.port = port
         self.host = host
@@ -198,6 +200,8 @@ class Client:
         self.idle_shutdown_minutes = idle_shutdown_minutes
         self.ppid = ppid if ppid is not None else _resolve_ppid()
         self.verbose = verbose
+        self.ping_interval_s = ping_interval_s
+        self.pong_timeout_s = pong_timeout_s
         self.session_id = str(uuid.uuid4())
         self.nonce = secrets.token_urlsafe(16)
         self._stop = asyncio.Event()
@@ -205,6 +209,15 @@ class Client:
         self._max_collision_retries = max_collision_retries
         self._collision_retries = 0
         self._connect_task: Optional[asyncio.Task] = None
+        # Heartbeat watchdog state: last time a "pong" was received (monotonic
+        # clock — immune to wall-clock adjustments across sleep/wake). None
+        # until the first successful connect sets a baseline.
+        self._last_pong_at: Optional[float] = None
+        # Reconnect bookkeeping, used to gate "reconnecting"/"reconnected"
+        # notifications so they only fire on real reconnects, never on the
+        # initial connect or on pre-first-connect startup racing.
+        self._ever_connected = False
+        self._attempt = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -235,6 +248,11 @@ class Client:
         try:
             backoff = shared.RECONNECT_BACKOFF_MIN_S
             while not self._stop.is_set():
+                if self._ever_connected and self._attempt > 0:
+                    _print_line(
+                        f"[interagents] reconnecting (attempt {self._attempt}, "
+                        f"backoff {backoff:.2f}s)..."
+                    )
                 spawn.ensure_server_running(self.port, self.host, self.idle_shutdown_minutes)
                 self._connect_task = asyncio.create_task(self._connect_and_serve())
                 try:
@@ -256,6 +274,8 @@ class Client:
                     self._connect_task = None
                 if self._stop.is_set():
                     break
+                if self._ever_connected:
+                    self._attempt += 1
                 jitter = backoff * shared.RECONNECT_JITTER_FRAC
                 delay = backoff + random.uniform(-jitter, jitter)
                 try:
@@ -338,6 +358,13 @@ class Client:
                 _print_line(f"[interagents] unexpected hello response: {welcome}")
                 return
 
+            is_reconnect = self._ever_connected and self._attempt > 0
+            if is_reconnect:
+                _print_line("[interagents] reconnected")
+            self._ever_connected = True
+            self._attempt = 0
+            self._last_pong_at = time.monotonic()
+
             _write_session_state(self.ppid, {
                 "session_id": self.session_id,
                 "name": self.name,
@@ -370,7 +397,7 @@ class Client:
                         if self.verbose:
                             _print_line(f"[interagents] {op}: {payload}")
                     elif op == "pong":
-                        pass
+                        self._last_pong_at = time.monotonic()
                     else:
                         if self.verbose:
                             _print_line(f"[interagents] {op}: {payload}")
@@ -378,9 +405,27 @@ class Client:
                 ping_task.cancel()
 
     async def _ping_loop(self, ws) -> None:
+        """Send periodic app-level pings and watch for pong staleness.
+
+        Protocol-level WS ping/pong (the `websockets` library default) does
+        not reliably catch every "alive but mute" socket — e.g. a laptop
+        sleep/wake cycle can leave a connection that never raises
+        ConnectionClosed. This app-level watchdog is the backstop: if no
+        pong lands within pong_timeout_s, force-close so the outer run()
+        loop's reconnect path takes over.
+        """
         while not self._stop.is_set():
             try:
-                await asyncio.sleep(shared.PING_INTERVAL_S)
+                await asyncio.sleep(self.ping_interval_s)
+                if self._last_pong_at is not None:
+                    stale_for = time.monotonic() - self._last_pong_at
+                    if stale_for > self.pong_timeout_s:
+                        _print_line(
+                            f"[interagents] no pong in {stale_for:.0f}s "
+                            f"(timeout {self.pong_timeout_s:.0f}s); forcing reconnect"
+                        )
+                        await ws.close()
+                        return
                 await ws.send(json.dumps({"op": "ping"}))
             except (websockets.ConnectionClosed, asyncio.CancelledError):
                 return
