@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 _VENV = Path.home() / ".olimpus" / "interagents" / "venv"
 _VENV_PY = _VENV / "bin" / "python"
@@ -24,7 +25,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from bin import discover, shared
+from bin import discover, shared, storage
 
 
 def _cursor_path(state: dict) -> Path:
@@ -71,6 +72,17 @@ def _payload_from_record(rec: dict) -> dict:
     }
 
 
+def _payload_from_sqlite_row(row) -> dict:
+    return {
+        "op": "msg",
+        "msg_id": row["id"],
+        "from": row["from_session_id"],
+        "from_name": row["from_name"],
+        "from_label": row["from_agent"] or "",
+        "text": row["text"],
+    }
+
+
 def _format_msg(msg: dict) -> str:
     sanitized = shared.sanitize_for_stdout(msg.get("text", ""))
     truncated, was_truncated, full_len = shared.truncate_for_stdout(sanitized)
@@ -85,6 +97,40 @@ def _format_msg(msg: dict) -> str:
     return f"{prefix} {truncated}"
 
 
+def _drain_sqlite(state: dict, limit: int, mark_read: bool) -> int:
+    if not storage.sqlite_enabled():
+        return 0
+    db = storage.db_path()
+    if not db.exists():
+        return 0
+    try:
+        conn = storage.connect(db)
+    except Exception:
+        return 0
+    emitted = 0
+    try:
+        rows = storage.drain_pending(
+            conn,
+            session_id=state.get("session_id", ""),
+            limit=limit,
+            include_delivered=False,
+        )
+        now = datetime.now(tz=timezone.utc).isoformat()
+        for row in rows:
+            print(_format_msg(_payload_from_sqlite_row(row)), flush=True)
+            emitted += 1
+            if mark_read:
+                storage.mark_delivered(
+                    conn,
+                    message_id=row["id"],
+                    session_id=state.get("session_id", ""),
+                    delivered_at=now,
+                )
+    finally:
+        conn.close()
+    return emitted
+
+
 def drain(limit: int, mark_read: bool = True) -> int:
     state, state_path = discover.find_listener_state_with_path()
     if state is None:
@@ -96,6 +142,14 @@ def drain(limit: int, mark_read: bool = True) -> int:
         discover.unlink_if_matches(state_path, state)
         print("not connected (stale state cleaned up)", file=sys.stderr)
         return 1
+
+    emitted = _drain_sqlite(state, limit, mark_read)
+    if emitted:
+        if mark_read:
+            log_path = shared.messages_log_path()
+            if log_path.exists():
+                _write_cursor(_cursor_path(state), log_path.stat().st_size)
+        return 0
 
     log_path = shared.messages_log_path()
     if not log_path.exists():

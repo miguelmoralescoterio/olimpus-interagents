@@ -1,0 +1,12 @@
+{
+  "mcp": {
+    "interagents": {
+      "type": "local",
+      "command": [
+        "python3",
+        "/Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py",
+        "mcp-stdio"
+      ]
+    }
+  }
+}

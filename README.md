@@ -15,6 +15,8 @@ system, developer, tool, filesystem, and safety rules still apply.
 - Long-lived listeners identified by an ASCII `name` and optional Unicode
   `label`.
 - Direct send, broadcast, list, status, and message log.
+- Dual-write SQLite persistence for sessions, messages, and delivery state
+  during the migration from JSONL.
 - Local-only bearer token stored with `0600` permissions under
   `~/.olimpus/interagents`.
 - Claude plugin/skill support plus a generic Python CLI for Codex, Kiro,
@@ -26,6 +28,13 @@ Unix-only for now: macOS, Linux, and WSL2.
 
 - Python 3.10+
 - Runtime dependencies: `websockets`, `psutil`
+
+Development uses Poetry:
+
+```bash
+poetry install
+poetry run pytest
+```
 
 Install runtime dependencies into the isolated venv:
 
@@ -55,9 +64,31 @@ Send and inspect from the same session:
 ```bash
 python3 skills/interagents/bin/interagents.py list
 python3 skills/interagents/bin/interagents.py send kiro-ui "please review the UI tests"
+python3 skills/interagents/bin/interagents.py send kiro-ui \
+  --in-reply-to-message-id q7r8a1c2 "answer: reviewed"
 python3 skills/interagents/bin/interagents.py broadcast "status: preparing release notes"
 python3 skills/interagents/bin/interagents.py status
+python3 skills/interagents/bin/interagents.py disconnect
+python3 skills/interagents/bin/interagents.py loop --interval-seconds 120
 ```
+
+`loop` is intended for hosts without reliable monitor/hook delivery. Do not
+start multiple loops for the same session.
+
+SQLite-backed message state helpers are available during the migration:
+
+```bash
+python3 skills/interagents/bin/interagents.py get-message <msg_id>
+python3 skills/interagents/bin/interagents.py mark-read <msg_id>
+python3 skills/interagents/bin/interagents.py mark-replied <msg_id> --reply-message-id <reply_msg_id>
+python3 skills/interagents/bin/interagents.py mark-skipped <msg_id> --reason "informational"
+python3 skills/interagents/bin/interagents.py mark-failed <msg_id> --reason "unsupported"
+python3 skills/interagents/bin/interagents.py export --table all --limit 1000
+python3 skills/interagents/bin/interagents.py export --table messages --include-text
+```
+
+Exports redact message text by default. `--include-text` is an explicit opt-in
+for trusted local debugging output.
 
 Incoming messages print like this:
 
@@ -67,6 +98,73 @@ Incoming messages print like this:
 
 If the target message is too large for a monitor/stdout notification, the full
 payload is still available in `~/.olimpus/interagents/messages.log`.
+
+During the SQLite migration, the server also writes structured state to
+`~/.olimpus/interagents/interagents.sqlite3`. The JSONL log remains the
+compatibility source of truth until cutover.
+To run the bus in JSONL-only mode, restart its shared server with
+`INTERAGENTS_SQLITE_ENABLED=false`; the default remains `true`.
+Late-joiner broadcast catch-up is opt-in:
+
+```bash
+INTERAGENTS_BROADCAST_CATCHUP_SECONDS=300 \
+  python3 skills/interagents/bin/interagents.py connect --name codex-main --label codex
+```
+
+Optional `launchd` and `systemd --user` supervisor examples live in
+`docs/supervisors/`.
+Per-agent MCP config examples live in `docs/adapters/mcp-configs.md`.
+
+## MCP Stdio Server
+
+The first MCP release is a stdio adapter over the existing local bus. It does
+not replace the WebSocket listener; it exposes the same operations as MCP tools
+for hosts that support local MCP servers.
+The server speaks MCP stdio with `Content-Length` framing. For simple local
+debugging only, set `INTERAGENTS_MCP_LINE_DELIMITED=1` to emit newline-delimited
+JSON-RPC responses.
+
+Run it directly:
+
+```bash
+python3 skills/interagents/bin/interagents.py mcp-stdio
+```
+
+Generic MCP config shape:
+
+```json
+{
+  "mcpServers": {
+    "interagents": {
+      "command": "python3",
+      "args": [
+        "/Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py",
+        "mcp-stdio"
+      ]
+    }
+  }
+}
+```
+
+Available tools:
+
+- `interagents_connect`
+- `interagents_disconnect`
+- `interagents_status`
+- `interagents_list_sessions`
+- `interagents_drain`
+- `interagents_get_pending_count`
+- `interagents_get_message`
+- `interagents_mark_read`
+- `interagents_mark_replied`
+- `interagents_mark_skipped`
+- `interagents_mark_failed`
+- `interagents_send`
+- `interagents_broadcast`
+
+`interagents_drain` labels message bodies as untrusted peer content. The
+receiving agent must still apply its own system, developer, tool, filesystem,
+network, and approval rules before acting.
 
 ## Claude Code Installation
 
@@ -216,6 +314,17 @@ monitors/monitors.json
 skills/interagents/SKILL.md
 ```
 
+## Migration & Rollback
+
+The bus is mid-migration from a JSONL-only message log to a SQLite-backed
+daemon: every send/broadcast dual-writes JSONL and SQLite, `drain` reads
+SQLite first and falls back to the JSONL cursor, and JSONL remains the
+compatibility source of truth until cutover. See
+[`docs/migration.md`](docs/migration.md) for the phase-by-phase status,
+rollback steps (including the reversible SQLite toggle and verification),
+how to inspect `interagents.sqlite3` and `messages.log` directly, and
+per-adapter troubleshooting.
+
 ## Security Model
 
 - Localhost only.
@@ -240,4 +349,5 @@ INTERAGENTS_DATA_DIR=/tmp/interagents-dev
 INTERAGENTS_PORT=9474
 INTERAGENTS_IDLE_MINUTES=10
 INTERAGENTS_PPID_OVERRIDE=12345
+INTERAGENTS_SQLITE_ENABLED=true
 ```

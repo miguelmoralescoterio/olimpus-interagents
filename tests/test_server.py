@@ -9,7 +9,7 @@ import uuid
 import pytest
 import websockets
 
-from bin import shared, spawn
+from bin import shared, spawn, storage
 
 # Server module imported lazily to give tests a chance to run shared first
 from bin.server import Server
@@ -98,6 +98,36 @@ class TestServerIdentityOrdering:
             assert spawn.is_server_up("127.0.0.1", free_port)
             assert shared.pidfile_path(free_port).exists()
             assert shared.pidfile_meta_path(free_port).exists()
+        finally:
+            srv.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_sqlite_can_be_disabled_without_disabling_jsonl_bus(
+        self, tmp_data_dir, free_port, monkeypatch,
+    ):
+        monkeypatch.setenv("INTERAGENTS_SQLITE_ENABLED", "false")
+        shared.secure_dir(tmp_data_dir)
+        token = shared.ensure_token(shared.token_path())
+        srv = Server(host="127.0.0.1", port=free_port, idle_shutdown_minutes=10)
+        task = asyncio.create_task(srv.serve())
+        await srv.wait_ready()
+        try:
+            assert srv._db is None
+            ws = await _connect(free_port)
+            receiver = await _connect(free_port)
+            try:
+                await _hello(ws, token, name="jsonl-only")
+                await _hello(receiver, token, name="receiver")
+                await _send_op(ws, "broadcast", text="fallback remains active")
+                response = await _recv_until(receiver, "msg")
+                assert response["text"] == "fallback remains active"
+            finally:
+                await ws.close()
+                await receiver.close()
+            records = [json.loads(line) for line in shared.messages_log_path().read_text().splitlines()]
+            assert records[-1]["text"] == "fallback remains active"
+            assert not storage.db_path().exists()
         finally:
             srv.stop()
             await asyncio.wait_for(task, timeout=2.0)
@@ -529,6 +559,55 @@ class TestReconnect:
             assert ids.count(sid) <= 1
         finally:
             await ws2.close()
+
+    async def test_same_session_id_reconnect_recovers_pending_messages(self, running_server):
+        """Messages sent while a listener was connected but never drained to
+        'read' (e.g. the AI agent crashed before processing them) must still
+        be recoverable via the SQLite pending queue after the listener
+        reconnects with the same session_id/nonce — this is the fallback path
+        `drain.py` relies on when the live websocket delivery was missed."""
+        srv, port, token = running_server
+        nonce = "reconnect-pending-nonce"
+        sid = str(uuid.uuid4())
+        ws_sender = await _connect(port)
+        ws1 = await _connect(port)
+        try:
+            await _hello(ws_sender, token, name="sender")
+            await _send_op(
+                ws1, "hello",
+                session_id=sid, name="alpha", label="",
+                cwd="/tmp", pid=1, role="agent",
+                nonce=nonce, token=token,
+            )
+            await _recv(ws1)  # welcome
+
+            await _send_op(ws_sender, "send", to="alpha", text="first")
+            await _recv_until(ws1, "msg")
+            await _send_op(ws_sender, "send", to="alpha", text="second")
+            await _recv_until(ws1, "msg")
+
+            # Disconnect rudely without ever marking the messages read/replied.
+            await ws1.close()
+            await asyncio.sleep(0.1)
+
+            ws2 = await _connect(port)
+            try:
+                await _send_op(
+                    ws2, "hello",
+                    session_id=sid, name="alpha", label="",
+                    cwd="/tmp", pid=1, role="agent",
+                    nonce=nonce, token=token,
+                )
+                welcome = await _recv(ws2)
+                assert welcome["op"] == "welcome"
+                assert welcome["session_id"] == sid
+
+                pending = storage.drain_pending(srv._db, session_id=sid, limit=10)
+                assert [row["text"] for row in pending] == ["first", "second"]
+            finally:
+                await ws2.close()
+        finally:
+            await ws_sender.close()
 
 
 class TestPing:

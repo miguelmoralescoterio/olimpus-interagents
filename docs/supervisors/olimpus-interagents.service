@@ -1,0 +1,12 @@
+[Unit]
+Description=Olimpus interagents local listener
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents
+ExecStart=/usr/bin/python3 /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py connect --daemon --name interagents-supervisor --label supervisor
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

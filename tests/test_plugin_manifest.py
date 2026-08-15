@@ -50,8 +50,23 @@ class TestCodexPluginJson:
         root = REPO / "plugins" / "interagents-codex" / "skills" / "interagents"
         assert (root / "SKILL.md").is_file()
         assert (root / "requirements.txt").is_file()
-        for script in ("client.py", "server.py", "send.py", "list.py", "drain.py", "interagents.py"):
+        for script in (
+            "client.py", "server.py", "send.py", "list.py", "drain.py",
+            "interagents.py", "mcp_stdio.py", "storage.py", "state.py",
+            "disconnect.py", "loop.py",
+        ):
             assert (root / "bin" / script).is_file()
+
+    def test_runtime_bundle_matches_root_skill_scripts(self):
+        root = REPO / "skills" / "interagents" / "bin"
+        bundled = REPO / "plugins" / "interagents-codex" / "skills" / "interagents" / "bin"
+        for script in (
+            "auto_start.py", "client.py", "server.py", "send.py", "list.py",
+            "drain.py", "interagents.py", "mcp_stdio.py", "storage.py",
+            "state.py", "disconnect.py", "loop.py", "shared.py", "discover.py",
+            "spawn.py",
+        ):
+            assert (bundled / script).read_text() == (root / script).read_text()
 
     def test_spanish_alias_skill_exists(self):
         alias = REPO / "plugins" / "interagents-codex" / "skills" / "interagentes" / "SKILL.md"
@@ -171,6 +186,21 @@ class TestBinScriptsExist:
 
     def test_auto_start_py(self):
         assert (BIN_DIR / "auto_start.py").is_file()
+
+    def test_mcp_stdio_py(self):
+        assert (BIN_DIR / "mcp_stdio.py").is_file()
+
+    def test_storage_py(self):
+        assert (BIN_DIR / "storage.py").is_file()
+
+    def test_state_py(self):
+        assert (BIN_DIR / "state.py").is_file()
+
+    def test_disconnect_py(self):
+        assert (BIN_DIR / "disconnect.py").is_file()
+
+    def test_loop_py(self):
+        assert (BIN_DIR / "loop.py").is_file()
 
     def test_no_bin_at_repo_root(self):
         """bin/ moved into the skill dir; old top-level location is gone."""

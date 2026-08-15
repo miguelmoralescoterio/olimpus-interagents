@@ -283,6 +283,7 @@ class Client:
             self._stop.set()
             return
         token = shared.ensure_token(shared.token_path())
+        container = shared.detect_container_process(os.getpid())
         async with websockets.connect(
             f"ws://{self.host}:{self.port}/",
             max_size=shared.WS_FRAME_CAP,
@@ -294,6 +295,10 @@ class Client:
                 "label": self.label,
                 "cwd": os.getcwd(),
                 "pid": os.getpid(),
+                "parent_pid": os.getppid(),
+                "container_pid": container.get("container_pid"),
+                "container_kind": container.get("container_kind", "unknown"),
+                "container_title": container.get("container_title", ""),
                 "role": shared.Role.AGENT.value,
                 "token": token,
                 "nonce": self.nonce,

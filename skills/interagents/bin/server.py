@@ -26,7 +26,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import websockets
@@ -38,7 +38,7 @@ _SKILL_DIR = Path(__file__).resolve().parent.parent
 if str(_SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILL_DIR))
 
-from bin import shared
+from bin import shared, storage
 
 log = logging.getLogger("interagents.server")
 
@@ -53,6 +53,10 @@ class ClientState:
     pid: int
     nonce: str
     ws: WebSocketServerProtocol
+    parent_pid: int = 0
+    container_pid: int = 0
+    container_kind: str = "unknown"
+    container_title: str = ""
     since: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
 
@@ -77,10 +81,42 @@ class Server:
         self._stop = asyncio.Event()
         self._ready = asyncio.Event()
         self._last_activity = time.monotonic()
+        self._db = None
+        self._broadcast_catchup_seconds = self._env_float(
+            "INTERAGENTS_BROADCAST_CATCHUP_SECONDS",
+            default=0,
+        )
+        # Off by default: purging is a fase-de-produccion concern, not a
+        # blocker for local dev. Operators opt in explicitly per deployment.
+        self._retention_days = self._env_float(
+            "INTERAGENTS_RETENTION_DAYS",
+            default=0,
+        )
 
     async def serve(self) -> None:
         shared.secure_dir(shared.data_dir())
         self._token = shared.ensure_token(shared.token_path())
+        try:
+            self._db = storage.connect()
+            startup_ts = datetime.now(tz=timezone.utc).isoformat()
+            storage.mark_stale_sessions(
+                self._db,
+                checked_at=startup_ts,
+                grace_seconds=shared.PONG_TIMEOUT_S,
+            )
+            if self._retention_days > 0:
+                purged = storage.purge_expired(
+                    self._db,
+                    now=startup_ts,
+                    retention_days=self._retention_days,
+                )
+                log.info(
+                    "startup retention purge: %s deliveries, %s messages",
+                    purged["deliveries"], purged["messages"],
+                )
+        except Exception as e:
+            log.warning("sqlite persistence disabled: %s", e)
+            self._db = None
 
         listen_sock = self._sock
         if listen_sock is None:
@@ -119,6 +155,8 @@ class Server:
             idle_task.cancel()
             server.close()
             await server.wait_closed()
+            if self._db is not None:
+                self._db.close()
             # Only remove the pidfile/meta if they still belong to this server
             # — avoids race where a fresh server has already taken over the
             # endpoint and rewritten identity before we exit cleanup.
@@ -249,6 +287,20 @@ class Server:
             pid_int = int(payload.get("pid", 0))
         except (TypeError, ValueError):
             pid_int = 0
+        try:
+            parent_pid_int = int(payload.get("parent_pid", 0))
+        except (TypeError, ValueError):
+            parent_pid_int = 0
+        try:
+            container_pid_int = int(payload.get("container_pid", 0) or 0)
+        except (TypeError, ValueError):
+            container_pid_int = 0
+        container_kind = payload.get("container_kind", "unknown")
+        if not isinstance(container_kind, str):
+            container_kind = "unknown"
+        container_title = payload.get("container_title", "")
+        if not isinstance(container_title, str):
+            container_title = ""
         # Session_id and nonce must be strings if provided.
         sid_raw = payload.get("session_id")
         if sid_raw is not None and not isinstance(sid_raw, str):
@@ -291,6 +343,10 @@ class Server:
                         label=listener_label,
                         cwd=listener_cwd,
                         pid=pid_int,
+                        parent_pid=parent_pid_int,
+                        container_pid=container_pid_int,
+                        container_kind=container_kind,
+                        container_title=container_title,
                         nonce=nonce_raw,
                         ws=ws,
                     )
@@ -355,6 +411,10 @@ class Server:
                     label=label,
                     cwd=cwd_clean,
                     pid=pid_int,
+                    parent_pid=parent_pid_int,
+                    container_pid=container_pid_int,
+                    container_kind=container_kind[:40] or "unknown",
+                    container_title=shared.sanitize_for_stdout(container_title)[:120],
                     nonce=nonce_raw,
                     ws=ws,
                 )
@@ -377,6 +437,8 @@ class Server:
         }))
         await self._broadcast_event({"op": "peer_joined", "session_id": sid, "name": name},
                                     exclude=sid)
+        self._persist_session(state)
+        self._catch_up_broadcasts(state)
         return state
 
     async def _dispatch_loop(self, state: ClientState) -> None:
@@ -392,6 +454,7 @@ class Server:
                 continue
             op = payload.get("op")
             if op == "ping":
+                self._touch_session(state)
                 await state.ws.send(json.dumps({"op": "pong"}))
             elif op == "list":
                 await self._handle_list(state)
@@ -535,6 +598,11 @@ class Server:
             await self._send_error(state.ws, shared.ErrorCode.INVALID_PAYLOAD,
                                    "to must be a string")
             return
+        in_reply_to = payload.get("in_reply_to_message_id")
+        if in_reply_to is not None and not isinstance(in_reply_to, str):
+            await self._send_error(state.ws, shared.ErrorCode.INVALID_PAYLOAD,
+                                   "in_reply_to_message_id must be a string")
+            return
         # Single locked phase: verify listener liveness AND resolve target,
         # so a control whose listener disappears can't slip a message
         # through between the liveness check and the send.
@@ -554,7 +622,10 @@ class Server:
             "text": text,
             "ts": datetime.now(tz=timezone.utc).isoformat(),
         }
+        if in_reply_to:
+            msg["in_reply_to_message_id"] = in_reply_to
         self._log_message(msg, kind="direct")
+        self._persist_message(msg, kind="direct", recipients=[target_state.session_id])
         await self._safe_send(target_state, msg)
         self._last_activity = time.monotonic()
 
@@ -567,6 +638,11 @@ class Server:
         if len(text) > shared.BROADCAST_TEXT_CAP:
             await self._send_error(state.ws, shared.ErrorCode.TEXT_TOO_LONG,
                                    "text exceeds broadcast cap")
+            return
+        in_reply_to = payload.get("in_reply_to_message_id")
+        if in_reply_to is not None and not isinstance(in_reply_to, str):
+            await self._send_error(state.ws, shared.ErrorCode.INVALID_PAYLOAD,
+                                   "in_reply_to_message_id must be a string")
             return
         from_id = self._from_id_for(state)
         # Liveness + targets snapshot first — a stale control connection
@@ -598,7 +674,14 @@ class Server:
             "text": text,
             "ts": datetime.now(tz=timezone.utc).isoformat(),
         }
+        if in_reply_to:
+            msg["in_reply_to_message_id"] = in_reply_to
         self._log_message(msg, kind="broadcast")
+        self._persist_message(
+            msg,
+            kind="broadcast",
+            recipients=[target.session_id for target in targets],
+        )
         for target in targets:
             await self._safe_send(target, msg)
         self._last_activity = time.monotonic()
@@ -622,6 +705,7 @@ class Server:
                 "from_label": msg.get("from_label", ""),
                 "to": msg.get("to", ""),
                 "to_session_id": msg.get("to_session_id", ""),
+                "in_reply_to_message_id": msg.get("in_reply_to_message_id", ""),
                 "text": msg["text"],
             }
             with open(path, "a", encoding="utf-8") as f:
@@ -697,10 +781,115 @@ class Server:
             else:
                 should_announce = False
         if should_announce:
+            self._mark_session_disconnected(state)
             await self._broadcast_event(
                 {"op": "peer_left", "session_id": state.session_id},
                 exclude=state.session_id,
             )
+
+    def _persist_session(self, state: ClientState) -> None:
+        if self._db is None or state.role != shared.Role.AGENT:
+            return
+        try:
+            storage.upsert_session(
+                self._db,
+                session_id=state.session_id,
+                name=state.name,
+                label=state.label,
+                cwd=state.cwd,
+                pid=state.pid,
+                parent_pid=state.parent_pid,
+                container_pid=state.container_pid,
+                container_kind=state.container_kind,
+                container_title=state.container_title,
+                connected_at=state.since.isoformat(),
+            )
+        except Exception as e:
+            log.warning("sqlite session persistence failed: %s", e)
+
+    def _catch_up_broadcasts(self, state: ClientState) -> None:
+        if (
+            self._db is None
+            or state.role != shared.Role.AGENT
+            or self._broadcast_catchup_seconds <= 0
+        ):
+            return
+        try:
+            since = (
+                datetime.now(tz=timezone.utc)
+                - timedelta(seconds=self._broadcast_catchup_seconds)
+            ).isoformat()
+            storage.catch_up_broadcasts(
+                self._db,
+                session_id=state.session_id,
+                since=since,
+            )
+        except Exception as e:
+            log.warning("sqlite broadcast catch-up failed: %s", e)
+
+    def _mark_session_disconnected(self, state: ClientState) -> None:
+        if self._db is None or state.role != shared.Role.AGENT:
+            return
+        try:
+            storage.mark_session_disconnected(
+                self._db,
+                session_id=state.session_id,
+                disconnected_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            log.warning("sqlite session disconnect persistence failed: %s", e)
+
+    def _touch_session(self, state: ClientState) -> None:
+        if self._db is None or state.role != shared.Role.AGENT:
+            return
+        try:
+            storage.touch_session(
+                self._db,
+                session_id=state.session_id,
+                seen_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            log.warning("sqlite session heartbeat failed: %s", e)
+
+    def _persist_message(self, msg: dict, kind: str, recipients: list[str]) -> None:
+        if self._db is None:
+            return
+        try:
+            storage.store_message(
+                self._db,
+                message_id=msg["msg_id"],
+                kind=kind,
+                from_session_id=msg["from"],
+                from_name=msg["from_name"],
+                from_agent=storage.infer_agent(msg.get("from_label", ""), msg.get("from_name", "")),
+                text=msg["text"],
+                created_at=msg["ts"],
+                recipients=recipients,
+                to_session_id=msg.get("to_session_id", ""),
+                to_name=msg.get("to", ""),
+                in_reply_to_message_id=msg.get("in_reply_to_message_id"),
+            )
+            if msg.get("in_reply_to_message_id"):
+                storage.apply_reply_disposition(
+                    self._db,
+                    original_message_id=msg["in_reply_to_message_id"],
+                    replying_session_id=msg["from"],
+                    reply_message_id=msg["msg_id"],
+                    reply_text=msg["text"],
+                    changed_at=msg["ts"],
+                )
+        except Exception as e:
+            log.warning("sqlite message persistence failed: %s", e)
+
+    @staticmethod
+    def _env_float(key: str, *, default: float) -> float:
+        value = os.environ.get(key)
+        if not value:
+            return default
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            return default
 
     async def _send_error(self, ws, code: str, message: str, **extra) -> None:
         try:
