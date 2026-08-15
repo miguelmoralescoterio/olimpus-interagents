@@ -1,2 +1,1 @@
-websockets>=12.0,<14.0
-psutil>=5.9
+../../../../skills/interagents/requirements.txt
