@@ -536,3 +536,154 @@ class TestEnvVarConfig:
         from bin.client import _env_float
         monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_IDLE_SHUTDOWN_MINUTES", "0.5")
         assert _env_float("CLAUDE_PLUGIN_OPTION_IDLE_SHUTDOWN_MINUTES", "X", default=10) == 0.5
+
+
+class _FakeHeartbeatServer:
+    """Minimal hand-rolled hello/welcome/ping server for driving Client.run()'s
+    reconnect state machine without the real bin/server.py protocol surface.
+
+    `respond_to_ping=False` simulates a socket that stays open but stops
+    acknowledging application-level pings — the "alive but mute" case the
+    pong-staleness watchdog exists to catch.
+    """
+
+    def __init__(self, respond_to_ping: bool = True):
+        self.respond_to_ping = respond_to_ping
+        self.connections: list = []
+        self._server = None
+
+    async def _handler(self, ws):
+        self.connections.append(ws)
+        async for raw in ws:
+            payload = json.loads(raw)
+            op = payload.get("op")
+            if op == "hello":
+                await ws.send(json.dumps({"op": "welcome"}))
+            elif op == "ping" and self.respond_to_ping:
+                await ws.send(json.dumps({"op": "pong"}))
+            # else: silently drop (ping with respond_to_ping=False)
+
+    async def start(self, host: str, port: int) -> None:
+        self._server = await websockets.serve(
+            self._handler, host, port, max_size=shared.WS_FRAME_CAP,
+        )
+
+    async def stop(self) -> None:
+        self._server.close()
+        await self._server.wait_closed()
+
+
+class TestHeartbeatWatchdog:
+    """Regression: listeners used to stay connected-but-deaf when pongs
+    stopped arriving without the socket actually closing (sleep/wake, NAT,
+    proxies). The watchdog in _ping_loop must notice and force a reconnect
+    through the existing backoff loop."""
+
+    def test_stale_pong_triggers_forced_reconnect(self, tmp_data_dir, free_port, monkeypatch):
+        monkeypatch.setattr(client_mod.shared, "verify_server_identity", lambda host, port: True)
+        monkeypatch.setattr(client_mod.spawn, "ensure_server_running", lambda *a, **kw: True)
+        printed: list = []
+        monkeypatch.setattr(client_mod, "_print_line", printed.append)
+
+        async def _drive():
+            server = _FakeHeartbeatServer(respond_to_ping=False)
+            await server.start("127.0.0.1", free_port)
+            try:
+                client = client_mod.Client(
+                    host="127.0.0.1", port=free_port, name="watchdog-test",
+                    ppid=990001, ping_interval_s=0.1, pong_timeout_s=0.25,
+                    idle_shutdown_minutes=1,
+                )
+                run_task = asyncio.ensure_future(client.run())
+                await asyncio.sleep(1.5)
+                client.stop()
+                try:
+                    await asyncio.wait_for(run_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    run_task.cancel()
+            finally:
+                await server.stop()
+
+        asyncio.new_event_loop().run_until_complete(_drive())
+
+        assert any("no pong in" in line for line in printed), printed
+        assert any("reconnecting" in line for line in printed), printed
+        assert any("reconnected" in line for line in printed), printed
+        # Multiple stale cycles in 1.5s at a 0.25s timeout confirms the loop
+        # keeps recovering rather than reconnecting once and going quiet.
+        assert sum("no pong in" in line for line in printed) >= 2, printed
+
+    def test_reconnects_and_logs_after_connection_drop(self, tmp_data_dir, free_port, monkeypatch):
+        """A clean peer-initiated close (real network drop, server restart)
+        must also flow through the same backoff+log path — not just the
+        watchdog-forced case — and must stay silent on the initial connect."""
+        monkeypatch.setattr(client_mod.shared, "verify_server_identity", lambda host, port: True)
+        monkeypatch.setattr(client_mod.spawn, "ensure_server_running", lambda *a, **kw: True)
+        printed: list = []
+        monkeypatch.setattr(client_mod, "_print_line", printed.append)
+
+        async def _drive():
+            server = _FakeHeartbeatServer(respond_to_ping=True)
+            await server.start("127.0.0.1", free_port)
+            try:
+                client = client_mod.Client(
+                    host="127.0.0.1", port=free_port, name="reconnect-test",
+                    ppid=990002, ping_interval_s=0.1, pong_timeout_s=5.0,
+                    idle_shutdown_minutes=1,
+                )
+                run_task = asyncio.ensure_future(client.run())
+                deadline = time.time() + 2.0
+                while time.time() < deadline and not server.connections:
+                    await asyncio.sleep(0.05)
+                assert server.connections, "client never connected"
+                assert not printed, f"unexpected notifications before any disconnect: {printed}"
+
+                await server.connections[0].close()
+
+                deadline = time.time() + 2.0
+                while time.time() < deadline and not any("reconnected" in l for l in printed):
+                    await asyncio.sleep(0.05)
+                client.stop()
+                try:
+                    await asyncio.wait_for(run_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    run_task.cancel()
+            finally:
+                await server.stop()
+
+        asyncio.new_event_loop().run_until_complete(_drive())
+
+        assert any("reconnecting" in line for line in printed), printed
+        assert any("reconnected" in line for line in printed), printed
+
+    def test_pong_resets_staleness_clock(self, tmp_data_dir, free_port, monkeypatch):
+        """Sanity check for the happy path: a server that keeps answering
+        pings must never be flagged stale, even past what would be the
+        timeout if pongs were ignored."""
+        monkeypatch.setattr(client_mod.shared, "verify_server_identity", lambda host, port: True)
+        monkeypatch.setattr(client_mod.spawn, "ensure_server_running", lambda *a, **kw: True)
+        printed: list = []
+        monkeypatch.setattr(client_mod, "_print_line", printed.append)
+
+        async def _drive():
+            server = _FakeHeartbeatServer(respond_to_ping=True)
+            await server.start("127.0.0.1", free_port)
+            try:
+                client = client_mod.Client(
+                    host="127.0.0.1", port=free_port, name="healthy-test",
+                    ppid=990003, ping_interval_s=0.1, pong_timeout_s=0.25,
+                    idle_shutdown_minutes=1,
+                )
+                run_task = asyncio.ensure_future(client.run())
+                await asyncio.sleep(1.0)
+                client.stop()
+                try:
+                    await asyncio.wait_for(run_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    run_task.cancel()
+            finally:
+                await server.stop()
+
+        asyncio.new_event_loop().run_until_complete(_drive())
+
+        assert printed == [], printed
