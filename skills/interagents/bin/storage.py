@@ -16,7 +16,7 @@ from typing import Iterable
 
 from bin import shared
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SQLITE_ENABLED_ENV = "INTERAGENTS_SQLITE_ENABLED"
 REDACTED_MESSAGE_TEXT = "<redacted; pass --include-text to export message text>"
 
@@ -111,13 +111,16 @@ def export_state(
 
 def migrate(conn: sqlite3.Connection) -> None:
     current = conn.execute("pragma user_version").fetchone()[0]
-    if current < 1:
-        _migrate_001(conn)
-        conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
-    elif current > SCHEMA_VERSION:
+    if current > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema version {current} is newer than supported {SCHEMA_VERSION}"
         )
+    if current < 1:
+        _migrate_001(conn)
+    if current < 2:
+        _migrate_002(conn)
+    if current < SCHEMA_VERSION:
+        conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
 
 
 def _migrate_001(conn: sqlite3.Connection) -> None:
@@ -189,6 +192,15 @@ def _migrate_001(conn: sqlite3.Connection) -> None:
 
         create index if not exists idx_messages_reply
           on messages(in_reply_to_message_id);
+        """
+    )
+
+
+def _migrate_002(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        create index if not exists idx_messages_direct_recipient
+          on messages(scope, to_name);
         """
     )
 
@@ -627,6 +639,56 @@ def apply_reply_disposition(
         reply_message_id=reply_message_id,
     )
     return disposition if changed else None
+
+
+def catch_up_direct(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    name: str,
+) -> int:
+    """Re-attach direct deliveries orphaned by a fresh session_id on reconnect.
+
+    A direct message is persisted against the recipient's session_id at send
+    time (`store_message(recipients=[target_state.session_id])`), but
+    `Client.session_id` is a new uuid4 on every process restart. A delivery
+    still `pending`/`delivered` under a now-dead session_id of the same agent
+    name becomes permanently undrainable once reached this way. This inserts
+    a pending delivery under the new session_id for each such message,
+    without touching the old (dead) delivery row.
+    """
+    if not name:
+        return 0
+    rows = list(
+        conn.execute(
+            """
+            select distinct m.id
+            from messages m
+            join message_deliveries d on d.message_id = m.id
+            where m.scope = 'direct'
+              and m.to_name = ?
+              and d.session_id != ?
+              and d.delivery_state in ('pending', 'delivered')
+              and not exists (
+                    select 1 from message_deliveries d2
+                    where d2.message_id = m.id and d2.session_id = ?
+                  )
+            """,
+            (name, session_id, session_id),
+        )
+    )
+    if not rows:
+        return 0
+    with conn:
+        conn.executemany(
+            """
+            insert or ignore into message_deliveries (
+              message_id, session_id, delivery_state, disposition
+            ) values (?, ?, 'pending', 'none')
+            """,
+            [(row["id"], session_id) for row in rows],
+        )
+    return len(rows)
 
 
 def catch_up_broadcasts(

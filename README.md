@@ -111,6 +111,12 @@ INTERAGENTS_BROADCAST_CATCHUP_SECONDS=300 \
   python3 skills/interagents/bin/interagents.py connect --name codex-main --label codex
 ```
 
+Direct-message catch-up runs automatically on every reconnect (no flag): each
+`Client` process gets a fresh `session_id`, so a still-pending direct message
+addressed to the old one would otherwise become permanently undrainable. On
+connect, the server re-attaches any pending/delivered direct deliveries for
+that agent name to the new session_id.
+
 Optional `launchd` and `systemd --user` supervisor examples live in
 `docs/supervisors/`.
 Per-agent MCP config examples live in `docs/adapters/mcp-configs.md`.
@@ -205,6 +211,10 @@ Then use:
 
 Codex can use the same bus through the generic CLI and the bundled plugin
 scaffold in `plugins/interagents-codex/`.
+
+For automatic receive → execute → reply in a dedicated Codex conversation,
+use the [persistent Codex monitor](adapters/codex/README.md). It connects to the
+existing WebSocket bus and does not depend on desktop stdout injection.
 
 ```bash
 codex plugin marketplace add /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/.agents/plugins

@@ -192,6 +192,7 @@ class Client:
         max_collision_retries: int = 3,
         ping_interval_s: float = shared.PING_INTERVAL_S,
         pong_timeout_s: float = shared.PONG_TIMEOUT_S,
+        on_message=None,
     ):
         self.port = port
         self.host = host
@@ -202,6 +203,7 @@ class Client:
         self.verbose = verbose
         self.ping_interval_s = ping_interval_s
         self.pong_timeout_s = pong_timeout_s
+        self.on_message = on_message
         self.session_id = str(uuid.uuid4())
         self.nonce = secrets.token_urlsafe(16)
         self._stop = asyncio.Event()
@@ -218,6 +220,11 @@ class Client:
         # initial connect or on pre-first-connect startup racing.
         self._ever_connected = False
         self._attempt = 0
+
+    @property
+    def ever_connected(self) -> bool:
+        """Whether this client has completed at least one successful connect."""
+        return self._ever_connected
 
     def stop(self) -> None:
         self._stop.set()
@@ -387,6 +394,9 @@ class Client:
                         continue
                     op = payload.get("op")
                     if op == "msg":
+                        if self.on_message is not None:
+                            await self.on_message(payload)
+                            continue
                         line = _format_msg(payload)
                         _print_line(line)
                         sanitized = shared.sanitize_for_stdout(payload.get("text", ""))
