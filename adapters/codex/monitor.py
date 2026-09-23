@@ -78,8 +78,11 @@ class Monitor:
         if not path.exists():
             return
         position = self.journal.get("log_position") or 0
-        if position > path.stat().st_size:
+        size = path.stat().st_size
+        if position > size:
             position = 0
+        elif position == size:
+            return
         with path.open(encoding="utf-8") as stream:
             stream.seek(position)
             while line := stream.readline():
@@ -174,7 +177,7 @@ class Monitor:
     async def work(self):
         while True:
             self.wakeup.clear()
-            if self.listener._ever_connected:
+            if self.listener.ever_connected:
                 self.recover_log()
                 # Include read rows: a human drain must not steal bridge jobs.
                 rows = self.db.execute("""

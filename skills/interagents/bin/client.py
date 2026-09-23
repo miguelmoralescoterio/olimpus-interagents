@@ -221,6 +221,11 @@ class Client:
         self._ever_connected = False
         self._attempt = 0
 
+    @property
+    def ever_connected(self) -> bool:
+        """Whether this client has completed at least one successful connect."""
+        return self._ever_connected
+
     def stop(self) -> None:
         self._stop.set()
         t = self._connect_task
