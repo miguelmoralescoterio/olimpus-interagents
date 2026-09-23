@@ -16,7 +16,7 @@ from typing import Iterable
 
 from bin import shared
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SQLITE_ENABLED_ENV = "INTERAGENTS_SQLITE_ENABLED"
 REDACTED_MESSAGE_TEXT = "<redacted; pass --include-text to export message text>"
 
@@ -111,13 +111,16 @@ def export_state(
 
 def migrate(conn: sqlite3.Connection) -> None:
     current = conn.execute("pragma user_version").fetchone()[0]
-    if current < 1:
-        _migrate_001(conn)
-        conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
-    elif current > SCHEMA_VERSION:
+    if current > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema version {current} is newer than supported {SCHEMA_VERSION}"
         )
+    if current < 1:
+        _migrate_001(conn)
+    if current < 2:
+        _migrate_002(conn)
+    if current < SCHEMA_VERSION:
+        conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
 
 
 def _migrate_001(conn: sqlite3.Connection) -> None:
@@ -189,6 +192,15 @@ def _migrate_001(conn: sqlite3.Connection) -> None:
 
         create index if not exists idx_messages_reply
           on messages(in_reply_to_message_id);
+        """
+    )
+
+
+def _migrate_002(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        create index if not exists idx_messages_direct_recipient
+          on messages(scope, to_name);
         """
     )
 

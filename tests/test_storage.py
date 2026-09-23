@@ -41,7 +41,31 @@ def test_migrate_initializes_schema(tmp_data_dir):
         "idx_deliveries_drain",
         "idx_messages_thread",
         "idx_messages_reply",
+        "idx_messages_direct_recipient",
     } <= indexes
+
+
+def test_migrate_upgrades_existing_schema_version_1_database(tmp_data_dir):
+    path = tmp_data_dir / "interagents.sqlite3"
+    conn = storage.connect(path)
+    conn.execute("drop index idx_messages_direct_recipient")
+    conn.execute("pragma user_version = 1")
+    conn.close()
+
+    conn = storage.connect(path)
+    try:
+        version = conn.execute("pragma user_version").fetchone()[0]
+        indexes = {
+            row["name"]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'index'"
+            )
+        }
+    finally:
+        conn.close()
+
+    assert version == storage.SCHEMA_VERSION, "Reconnecting must bring an old database current"
+    assert "idx_messages_direct_recipient" in indexes
 
 
 def test_upsert_session_records_agent_capabilities_and_status(tmp_data_dir):
