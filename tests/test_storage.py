@@ -41,7 +41,31 @@ def test_migrate_initializes_schema(tmp_data_dir):
         "idx_deliveries_drain",
         "idx_messages_thread",
         "idx_messages_reply",
+        "idx_messages_direct_recipient",
     } <= indexes
+
+
+def test_migrate_upgrades_existing_schema_version_1_database(tmp_data_dir):
+    path = tmp_data_dir / "interagents.sqlite3"
+    conn = storage.connect(path)
+    conn.execute("drop index idx_messages_direct_recipient")
+    conn.execute("pragma user_version = 1")
+    conn.close()
+
+    conn = storage.connect(path)
+    try:
+        version = conn.execute("pragma user_version").fetchone()[0]
+        indexes = {
+            row["name"]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'index'"
+            )
+        }
+    finally:
+        conn.close()
+
+    assert version == storage.SCHEMA_VERSION, "Reconnecting must bring an old database current"
+    assert "idx_messages_direct_recipient" in indexes
 
 
 def test_upsert_session_records_agent_capabilities_and_status(tmp_data_dir):
@@ -433,6 +457,120 @@ def test_catch_up_broadcasts_adds_missing_delivery_rows(tmp_data_dir):
     assert rows[0]["message_id"] == "recent"
     assert rows[0]["session_id"] == "late"
     assert rows[0]["delivery_state"] == "pending"
+
+
+def test_catch_up_direct_reattaches_pending_delivery_to_new_session(tmp_data_dir):
+    conn = storage.connect(tmp_data_dir / "interagents.sqlite3")
+    try:
+        storage.store_message(
+            conn,
+            message_id="orphaned",
+            kind="direct",
+            from_session_id="sender",
+            from_name="milk",
+            from_agent="claude",
+            text="ack: luffy registrado",
+            created_at="2026-09-22T21:45:54+00:00",
+            recipients=["old-session"],
+            to_session_id="old-session",
+            to_name="luffy",
+        )
+
+        count = storage.catch_up_direct(conn, session_id="new-session", name="luffy")
+        rows = list(conn.execute(
+            "select * from message_deliveries where message_id = 'orphaned'"
+        ))
+    finally:
+        conn.close()
+
+    assert count == 1
+    assert {row["session_id"] for row in rows} == {"old-session", "new-session"}
+    new_row = next(row for row in rows if row["session_id"] == "new-session")
+    assert new_row["delivery_state"] == "pending", "Reattached delivery must be drainable"
+
+
+def test_catch_up_direct_ignores_other_recipients_and_terminal_deliveries(tmp_data_dir):
+    conn = storage.connect(tmp_data_dir / "interagents.sqlite3")
+    try:
+        storage.store_message(
+            conn,
+            message_id="for-someone-else",
+            kind="direct",
+            from_session_id="sender",
+            from_name="milk",
+            from_agent="claude",
+            text="task for vegeta",
+            created_at="2026-09-22T21:00:00+00:00",
+            recipients=["vegeta-old"],
+            to_session_id="vegeta-old",
+            to_name="vegeta",
+        )
+        storage.store_message(
+            conn,
+            message_id="already-read",
+            kind="direct",
+            from_session_id="sender",
+            from_name="milk",
+            from_agent="claude",
+            text="already consumed",
+            created_at="2026-09-22T21:10:00+00:00",
+            recipients=["luffy-old"],
+            to_session_id="luffy-old",
+            to_name="luffy",
+        )
+        storage.mark_read(
+            conn, message_id="already-read", session_id="luffy-old",
+            read_at="2026-09-22T21:11:00+00:00",
+        )
+
+        count = storage.catch_up_direct(conn, session_id="luffy-new", name="luffy")
+        rows = list(conn.execute(
+            "select * from message_deliveries where session_id = 'luffy-new'"
+        ))
+    finally:
+        conn.close()
+
+    assert count == 0, "Messages addressed to other agents or already read must not be reattached"
+    assert rows == []
+
+
+def test_catch_up_direct_is_idempotent_across_repeated_reconnects(tmp_data_dir):
+    conn = storage.connect(tmp_data_dir / "interagents.sqlite3")
+    try:
+        storage.store_message(
+            conn,
+            message_id="orphaned",
+            kind="direct",
+            from_session_id="sender",
+            from_name="milk",
+            from_agent="claude",
+            text="ack",
+            created_at="2026-09-22T21:45:54+00:00",
+            recipients=["old-session"],
+            to_session_id="old-session",
+            to_name="luffy",
+        )
+
+        first = storage.catch_up_direct(conn, session_id="new-session", name="luffy")
+        second = storage.catch_up_direct(conn, session_id="new-session", name="luffy")
+        rows = list(conn.execute(
+            "select * from message_deliveries where session_id = 'new-session'"
+        ))
+    finally:
+        conn.close()
+
+    assert (first, second) == (1, 0), "A session already caught up must not be reattached again"
+    assert len(rows) == 1
+
+
+def test_catch_up_direct_without_name_is_a_noop(tmp_data_dir):
+    conn = storage.connect(tmp_data_dir / "interagents.sqlite3")
+    try:
+        count = storage.catch_up_direct(conn, session_id="new-session", name="")
+    finally:
+        conn.close()
+
+    assert count == 0
 
 
 def test_failed_poison_message_does_not_block_queue(tmp_data_dir):
