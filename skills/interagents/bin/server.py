@@ -439,6 +439,7 @@ class Server:
                                     exclude=sid)
         self._persist_session(state)
         self._catch_up_broadcasts(state)
+        self._catch_up_direct(state)
         return state
 
     async def _dispatch_loop(self, state: ClientState) -> None:
@@ -826,6 +827,18 @@ class Server:
             )
         except Exception as e:
             log.warning("sqlite broadcast catch-up failed: %s", e)
+
+    def _catch_up_direct(self, state: ClientState) -> None:
+        if self._db is None or state.role != shared.Role.AGENT:
+            return
+        try:
+            storage.catch_up_direct(
+                self._db,
+                session_id=state.session_id,
+                name=state.name,
+            )
+        except Exception as e:
+            log.warning("sqlite direct-message catch-up failed: %s", e)
 
     def _mark_session_disconnected(self, state: ClientState) -> None:
         if self._db is None or state.role != shared.Role.AGENT:

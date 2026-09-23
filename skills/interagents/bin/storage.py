@@ -629,6 +629,56 @@ def apply_reply_disposition(
     return disposition if changed else None
 
 
+def catch_up_direct(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    name: str,
+) -> int:
+    """Re-attach direct deliveries orphaned by a fresh session_id on reconnect.
+
+    A direct message is persisted against the recipient's session_id at send
+    time (`store_message(recipients=[target_state.session_id])`), but
+    `Client.session_id` is a new uuid4 on every process restart. A delivery
+    still `pending`/`delivered` under a now-dead session_id of the same agent
+    name becomes permanently undrainable once reached this way. This inserts
+    a pending delivery under the new session_id for each such message,
+    without touching the old (dead) delivery row.
+    """
+    if not name:
+        return 0
+    rows = list(
+        conn.execute(
+            """
+            select distinct m.id
+            from messages m
+            join message_deliveries d on d.message_id = m.id
+            where m.scope = 'direct'
+              and m.to_name = ?
+              and d.session_id != ?
+              and d.delivery_state in ('pending', 'delivered')
+              and not exists (
+                    select 1 from message_deliveries d2
+                    where d2.message_id = m.id and d2.session_id = ?
+                  )
+            """,
+            (name, session_id, session_id),
+        )
+    )
+    if not rows:
+        return 0
+    with conn:
+        conn.executemany(
+            """
+            insert or ignore into message_deliveries (
+              message_id, session_id, delivery_state, disposition
+            ) values (?, ?, 'pending', 'none')
+            """,
+            [(row["id"], session_id) for row in rows],
+        )
+    return len(rows)
+
+
 def catch_up_broadcasts(
     conn: sqlite3.Connection,
     *,
