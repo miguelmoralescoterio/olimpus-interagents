@@ -206,6 +206,10 @@ Then use:
 Codex can use the same bus through the generic CLI and the bundled plugin
 scaffold in `plugins/interagents-codex/`.
 
+For automatic receive → execute → reply in a dedicated Codex conversation,
+use the [persistent Codex monitor](adapters/codex/README.md). It connects to the
+existing WebSocket bus and does not depend on desktop stdout injection.
+
 ```bash
 codex plugin marketplace add /Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/.agents/plugins
 codex plugin add interagents-codex@personal
