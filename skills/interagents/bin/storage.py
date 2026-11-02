@@ -18,6 +18,7 @@ from bin import shared
 
 SCHEMA_VERSION = 2
 SQLITE_ENABLED_ENV = "INTERAGENTS_SQLITE_ENABLED"
+QUEUED_KIND = "queued"
 REDACTED_MESSAGE_TEXT = "<redacted; pass --include-text to export message text>"
 
 
@@ -646,6 +647,7 @@ def catch_up_direct(
     *,
     session_id: str,
     name: str,
+    since: str | None = None,
 ) -> int:
     """Re-attach direct deliveries orphaned by a fresh session_id on reconnect.
 
@@ -656,6 +658,11 @@ def catch_up_direct(
     name becomes permanently undrainable once reached this way. This inserts
     a pending delivery under the new session_id for each such message,
     without touching the old (dead) delivery row.
+
+    Messages already consumed by any session (`delivery_state = 'read'`) are
+    skipped, and `since` bounds the lookback window. Without both guards every
+    reconnect re-attached the whole unread history to the new session_id,
+    multiplying delivery rows on each re-armed monitor.
     """
     if not name:
         return 0
@@ -669,12 +676,17 @@ def catch_up_direct(
               and m.to_name = ?
               and d.session_id != ?
               and d.delivery_state in ('pending', 'delivered')
+              and m.created_at >= ?
               and not exists (
                     select 1 from message_deliveries d2
                     where d2.message_id = m.id and d2.session_id = ?
                   )
+              and not exists (
+                    select 1 from message_deliveries d3
+                    where d3.message_id = m.id and d3.delivery_state = 'read'
+                  )
             """,
-            (name, session_id, session_id),
+            (name, session_id, since or "", session_id),
         )
     )
     if not rows:
@@ -689,6 +701,46 @@ def catch_up_direct(
             [(row["id"], session_id) for row in rows],
         )
     return len(rows)
+
+
+def latest_session_for_name(conn: sqlite3.Connection, *, name: str) -> str | None:
+    """Return the most recently seen session_id registered under `name`."""
+    if not name:
+        return None
+    row = conn.execute(
+        """
+        select id from sessions
+        where name = ?
+        order by last_seen_at desc
+        limit 1
+        """,
+        (name,),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def pending_queued_for_session(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    """Queued (offline-recipient) messages not yet pushed to `session_id`."""
+    return list(
+        conn.execute(
+            """
+            select m.*
+            from messages m
+            join message_deliveries d on d.message_id = m.id
+            where d.session_id = ?
+              and d.delivery_state = 'pending'
+              and m.kind = ?
+            order by m.created_at asc, m.seq asc
+            limit ?
+            """,
+            (session_id, QUEUED_KIND, max(1, limit)),
+        )
+    )
 
 
 def catch_up_broadcasts(

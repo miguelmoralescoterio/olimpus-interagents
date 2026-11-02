@@ -55,6 +55,8 @@ def _format_msg(msg: dict) -> str:
     from_label = msg.get("from_label", "")
     msg_id = msg.get("msg_id", "")
     label_part = f' "{from_label}"' if from_label else ""
+    if msg.get("queued"):
+        label_part += " queued"
     if was_truncated:
         prefix = f'[interagents msg={msg_id} from="{from_name}"{label_part} truncated={full_len}]'
     else:

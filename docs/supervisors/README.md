@@ -52,8 +52,14 @@ systemctl --user daemon-reload
 ## Notes
 
 - Review and edit the `--name`, `--label`, and repo path before installing.
-- The examples use `connect --daemon`, so the supervised command exits after
-  spawning the actual listener. Supervisors may report the unit as completed;
-  the listener remains tracked by `interagents status`.
+- The launchd template runs the listener in the foreground with `KeepAlive`,
+  so the bus stays up from login: the supervisor listener keeps the server
+  from idle-shutting down, its reconnect loop re-spawns the server if it dies,
+  and launchd restarts the listener if it exits. Agent monitors that expire
+  (Claude `Monitor` has a 30-minute cap) only need to be re-armed with the
+  same `--name`; directs sent meanwhile are queued and replayed.
+- The systemd example uses `connect --daemon`, so the supervised command exits
+  after spawning the actual listener. Supervisors may report the unit as
+  completed; the listener remains tracked by `interagents status`.
 - For a stricter always-running setup, point the supervisor directly at
   `skills/interagents/bin/client.py --name <name> --label <label>`.
