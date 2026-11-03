@@ -660,7 +660,9 @@ def catch_up_direct(
     without touching the old (dead) delivery row.
 
     Messages already consumed by any session (`delivery_state = 'read'`) are
-    skipped, and `since` bounds the lookback window. Without both guards every
+    skipped, and `since` bounds the lookback window (queued messages are exempt:
+    they must survive however long the recipient stays offline). Without both
+    guards every
     reconnect re-attached the whole unread history to the new session_id,
     multiplying delivery rows on each re-armed monitor.
     """
@@ -676,7 +678,7 @@ def catch_up_direct(
               and m.to_name = ?
               and d.session_id != ?
               and d.delivery_state in ('pending', 'delivered')
-              and m.created_at >= ?
+              and (m.created_at >= ? or m.kind = ?)
               and not exists (
                     select 1 from message_deliveries d2
                     where d2.message_id = m.id and d2.session_id = ?
@@ -686,7 +688,7 @@ def catch_up_direct(
                     where d3.message_id = m.id and d3.delivery_state = 'read'
                   )
             """,
-            (name, session_id, since or "", session_id),
+            (name, session_id, since or "", QUEUED_KIND, session_id),
         )
     )
     if not rows:

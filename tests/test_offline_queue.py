@@ -69,6 +69,15 @@ class TestBoundedDirectCatchUp:
         assert count == 1
         assert attached == {"fresh"}
 
+    def test_queued_message_outlives_the_window(self, db):
+        _store_direct(db, "queued-old", created_at=OLD_TS, kind=storage.QUEUED_KIND)
+
+        count = storage.catch_up_direct(
+            db, session_id="luffy-new", name="luffy", since=WINDOW_START,
+        )
+
+        assert count == 1, "An offline-queued direct must not expire with the catch-up window"
+
     def test_message_read_by_any_session_is_not_reattached(self, db):
         _store_direct(db, "consumed", session="luffy-a")
         db.execute(
