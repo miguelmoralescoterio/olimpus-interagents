@@ -42,6 +42,11 @@ from bin import shared, storage
 
 log = logging.getLogger("interagents.server")
 
+LIVE_MONITOR_STRATEGY = "live_monitor"
+# Lookback for re-attaching unread directs on reconnect. Bounded so a re-armed
+# monitor does not drag the whole unread history into every new session.
+DEFAULT_DIRECT_CATCHUP_SECONDS = 24 * 3600
+
 
 @dataclass
 class ClientState:
@@ -85,6 +90,10 @@ class Server:
         self._broadcast_catchup_seconds = self._env_float(
             "INTERAGENTS_BROADCAST_CATCHUP_SECONDS",
             default=0,
+        )
+        self._direct_catchup_seconds = self._env_float(
+            "INTERAGENTS_DIRECT_CATCHUP_SECONDS",
+            default=DEFAULT_DIRECT_CATCHUP_SECONDS,
         )
         # Off by default: purging is a fase-de-produccion concern, not a
         # blocker for local dev. Operators opt in explicitly per deployment.
@@ -440,6 +449,7 @@ class Server:
         self._persist_session(state)
         self._catch_up_broadcasts(state)
         self._catch_up_direct(state)
+        await self._replay_queued(state)
         return state
 
     async def _dispatch_loop(self, state: ClientState) -> None:
@@ -610,6 +620,10 @@ class Server:
         target_state, reject = await self._resolve_send_target(state, target)
         if reject is not None:
             code, message, extras = reject
+            if code == shared.ErrorCode.UNKNOWN_PEER and await self._queue_for_offline(
+                state, target, text, in_reply_to,
+            ):
+                return
             await self._send_error(state.ws, code, message, **extras)
             return
         msg = {
@@ -627,7 +641,8 @@ class Server:
             msg["in_reply_to_message_id"] = in_reply_to
         self._log_message(msg, kind="direct")
         self._persist_message(msg, kind="direct", recipients=[target_state.session_id])
-        await self._safe_send(target_state, msg)
+        if await self._safe_send(target_state, msg):
+            self._mark_consumed(target_state, msg["msg_id"])
         self._last_activity = time.monotonic()
 
     async def _handle_broadcast(self, state: ClientState, payload) -> None:
@@ -766,11 +781,12 @@ class Server:
             except websockets.ConnectionClosed:
                 pass
 
-    async def _safe_send(self, target: ClientState, msg: dict) -> None:
+    async def _safe_send(self, target: ClientState, msg: dict) -> bool:
         try:
             await target.ws.send(json.dumps(msg))
         except websockets.ConnectionClosed:
-            pass
+            return False
+        return True
 
     async def _unregister(self, state: ClientState) -> None:
         async with self._registry_lock:
@@ -832,13 +848,110 @@ class Server:
         if self._db is None or state.role != shared.Role.AGENT:
             return
         try:
+            since = ""
+            if self._direct_catchup_seconds > 0:
+                since = (
+                    datetime.now(tz=timezone.utc)
+                    - timedelta(seconds=self._direct_catchup_seconds)
+                ).isoformat()
             storage.catch_up_direct(
                 self._db,
                 session_id=state.session_id,
                 name=state.name,
+                since=since,
             )
         except Exception as e:
             log.warning("sqlite direct-message catch-up failed: %s", e)
+
+    async def _queue_for_offline(
+        self, state: ClientState, target: str, text: str, in_reply_to: Optional[str],
+    ) -> bool:
+        """Persist a direct for a known-but-offline agent name.
+
+        Covers the gap while a listener is re-armed (e.g. a Claude Monitor
+        that expired): instead of rejecting with UNKNOWN_PEER, the message is
+        stored against the name's last session and pushed on reconnect.
+        Unknown names still error so typos are not silently swallowed.
+        """
+        if self._db is None or not target or target == state.name:
+            return False
+        try:
+            last_sid = storage.latest_session_for_name(self._db, name=target)
+        except Exception as e:
+            log.warning("sqlite offline lookup failed: %s", e)
+            return False
+        if last_sid is None:
+            return False
+        msg = {
+            "op": "msg",
+            "msg_id": uuid.uuid4().hex[:8],
+            "from": self._from_id_for(state),
+            "from_name": state.name,
+            "from_label": state.label,
+            "to": target,
+            "to_session_id": last_sid,
+            "text": text,
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        if in_reply_to:
+            msg["in_reply_to_message_id"] = in_reply_to
+        self._log_message(msg, kind=storage.QUEUED_KIND)
+        self._persist_message(msg, kind=storage.QUEUED_KIND, recipients=[last_sid])
+        await state.ws.send(json.dumps({"op": "queued", "msg_id": msg["msg_id"], "to": target}))
+        self._last_activity = time.monotonic()
+        return True
+
+    async def _replay_queued(self, state: ClientState) -> None:
+        if self._db is None or state.role != shared.Role.AGENT:
+            return
+        try:
+            rows = storage.pending_queued_for_session(self._db, session_id=state.session_id)
+        except Exception as e:
+            log.warning("sqlite queued replay lookup failed: %s", e)
+            return
+        for row in rows:
+            msg = {
+                "op": "msg",
+                "msg_id": row["id"],
+                "from": row["from_session_id"],
+                "from_name": row["from_name"],
+                "from_label": row["from_agent"] or "",
+                "to": state.name,
+                "to_session_id": state.session_id,
+                "text": row["text"],
+                "ts": row["created_at"],
+                "queued": True,
+            }
+            if row["in_reply_to_message_id"]:
+                msg["in_reply_to_message_id"] = row["in_reply_to_message_id"]
+            if not await self._safe_send(state, msg):
+                return
+            self._mark_consumed(state, row["id"])
+
+    def _mark_consumed(self, target: ClientState, message_id: str) -> None:
+        """Record a successful websocket push.
+
+        A live stdout monitor (Claude) surfaces the line to the agent the
+        moment it is printed, so the push counts as `read`. Hook/polling hosts
+        still have to drain, so the push only counts as `delivered`.
+        """
+        if self._db is None:
+            return
+        now = datetime.now(tz=timezone.utc).isoformat()
+        agent = storage.infer_agent(target.label, target.name)
+        try:
+            if storage.receive_strategy_for(agent) == LIVE_MONITOR_STRATEGY:
+                storage.mark_read(
+                    self._db, message_id=message_id,
+                    session_id=target.session_id, read_at=now,
+                )
+            else:
+                storage.mark_delivered(
+                    self._db, message_id=message_id,
+                    session_id=target.session_id, delivered_at=now,
+                )
+        except Exception as e:
+            log.warning("sqlite delivery marking failed: %s", e)
 
     def _mark_session_disconnected(self, state: ClientState) -> None:
         if self._db is None or state.role != shared.Role.AGENT:

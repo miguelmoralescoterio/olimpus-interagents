@@ -150,12 +150,14 @@ Works the same whether the skill is installed as part of the plugin
 2. **Start the monitor**:
    ```
    Monitor(
-     command="python3 <bin>/client.py --name <name>",
+     command="python3 <bin>/client.py --name <name> --label claude",
      description="interagents messages",
-     persistent=true,
-     timeout_ms=3600000
+     timeout_ms=1800000
    )
    ```
+   `Monitor` has a hard 30-minute cap (larger `timeout_ms` values are
+   clamped) and no `persistent` option. `--label claude` marks the session
+   as a live stdout monitor, so every pushed line counts as read.
    Don't pass `--port` or `--idle-shutdown-minutes`. `client.py` resolves
    them with this precedence (highest first):
    1. CLI arg (wins if passed)
@@ -196,6 +198,13 @@ was already taken").
 **On `[interagents] name '…' taken after N retries`**: the auto-retry budget
 is exhausted (very rare; means many sessions in the same cwd). Tell the user
 and ask them for a name: `/interagents connect <some-other-name>`.
+
+**On the Monitor expiry notice** (the `interagents messages` monitor
+was killed at its 30-minute deadline): re-arm it immediately with the
+**same** `--name` and the same `Monitor(...)` call from step 2. Do not ask
+the user and do not pick a new name. Directs sent to you while you were
+offline were queued by the server and arrive right after reconnecting,
+tagged `queued` in the prefix — handle them like any other message.
 
 **On `[interagents] dependencies missing`**: run `/interagents install-deps`,
 then re-run `/interagents connect`.

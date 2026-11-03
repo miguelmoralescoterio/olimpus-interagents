@@ -96,6 +96,9 @@ async def _run(args) -> int:
         try:
             resp_raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
             resp = json.loads(resp_raw)
+            if resp.get("op") == "queued":
+                print(f"queued: {resp.get('to', '')} is offline; "
+                      f"msg={resp.get('msg_id', '')} delivered on reconnect")
             if resp.get("op") == "error":
                 msg = f"error: {resp.get('code', '')}: {resp.get('message', '')}"
                 if "matches" in resp:

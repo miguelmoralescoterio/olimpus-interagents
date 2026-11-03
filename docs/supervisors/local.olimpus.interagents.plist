@@ -11,7 +11,6 @@
     <string>/usr/bin/python3</string>
     <string>/Users/moralesvillalobos-mac/olimpussoft/olimpus-interagents/skills/interagents/bin/interagents.py</string>
     <string>connect</string>
-    <string>--daemon</string>
     <string>--name</string>
     <string>interagents-supervisor</string>
     <string>--label</string>
@@ -23,6 +22,15 @@
 
   <key>RunAtLoad</key>
   <true/>
+
+  <!-- Foreground listener: launchd restarts it if it exits. Its registry
+       entry keeps the bus server from idle-shutting down, and its reconnect
+       loop re-spawns the server if that process dies. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
 
   <key>StandardOutPath</key>
   <string>/Users/moralesvillalobos-mac/.olimpus/interagents/supervisor.launchd.out.log</string>
