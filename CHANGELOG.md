@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-03
+
 ### Added
 - Offline queue for direct messages (OLIMPUSSW-1360): a direct addressed to a
   known agent name with no live listener is stored in SQLite (`kind=queued`)
@@ -14,6 +16,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `KeepAlive`, keeping the bus up from login.
 
 ### Changed
+- Plugin version bump to 0.1.6 (OLIMPUSSW-1386): 0.1.5 caches did not include the
+  OLIMPUSSW-1360 changes below, so `/plugin` had nothing new to distribute.
 - Live websocket pushes now mark the delivery `read` for live stdout monitors
   (Claude) and `delivered` for hook/polling hosts.
 - `catch_up_direct` is bounded by `INTERAGENTS_DIRECT_CATCHUP_SECONDS`
