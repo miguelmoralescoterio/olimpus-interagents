@@ -165,7 +165,9 @@ class TestSendHelper:
             assert msg["to_session_id"] == state_b["session_id"]
             assert msg["in_reply_to_message_id"] == "orig-1"
             assert delivery["session_id"] == state_b["session_id"]
-            assert delivery["delivery_state"] == "pending"
+            assert delivery["delivery_state"] == "delivered", (
+                "A live websocket push to a non-monitor host is recorded as delivered"
+            )
             assert sessions[state_a["session_id"]] == "active"
             assert sessions[state_b["session_id"]] == "active"
         finally:
@@ -210,7 +212,9 @@ class TestSendHelper:
                 conn.close()
 
             assert msg["text"] == "survive kill"
-            assert delivery["delivery_state"] == "pending"
+            assert delivery["delivery_state"] == "delivered", (
+                "The committed delivery state must survive a SIGKILL of the server"
+            )
         finally:
             for p in (listener_a, listener_b):
                 p.terminate()
